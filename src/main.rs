@@ -26,7 +26,7 @@ const HTYPE_ETHER: u8 = 1;
 const HLEN_MACADDR: u8 = 6;
 
 const DHCP_MINIMUM_SIZE: usize = 548;
-const MESSAGE_TYPE_CODE: u8 = 53;
+const OPTION_MESSAGE_TYPE_CODE: u8 = 53;
 
 const DHCPDISCOVER: u8 = 1;
 const DHCPOFFER   : u8 = 2;
@@ -89,6 +89,26 @@ impl DhcpPacket {
         Some(packet)
     }
 
+    // fn create() -> DhcpPacket {
+    //     DhcpPacket {
+    //         op:     0,
+    //         htype:  0,
+    //         hlen:   0,
+    //         hops:   0,
+    //         xid:    0,
+    //         secs:   0, /* 8: seconds elapsed since client started to trying to boot */
+    //         flags:  0, /* 10: flags */
+    //         ciaddr: create_ip(&buf[12..16]), /* 12: client ip addr if already in use */
+    //         yiaddr: create_ip(&buf[16..20]), /* 16: client ip addr */
+    //         siaddr: create_ip(&buf[20..24]), /* 20: ip addr of next server to use in bootstrap */
+    //         giaddr: create_ip(&buf[24..28]), /* 24: ip addr of relay agent */
+    //         chaddr: create_macaddr(&buf[28..44]), /* 28: client hardware address */
+    //         sname:   [0u8; 64], /* 44: optional server host name */
+    //         file:    [0u8; 128], /* 108: boot file name */
+    //         options: buf[236..].to_vec()
+    //     }
+    // }
+
     //optionはcode, length, bufferの順に並んでいる
     fn get_option(&self, option_code: u8) -> Option<Vec<u8>> {
         let mut index = 4; // 最初の4バイトはクッキー
@@ -108,6 +128,11 @@ impl DhcpPacket {
         None
     }
 
+    fn set_option(&mut self, code: u8, len: u8, buf: &mut Vec<u8>) {
+        self.options.push(code);
+        self.options.push(len);
+        self.options.append(buf);
+    }
 }
 
 fn main() {
@@ -150,30 +175,30 @@ fn dump_dhcp_info(packet: &DhcpPacket) {
     println!("xid: {}", packet.xid);
     println!("secs: {}", packet.secs);
     println!("flags: {}", packet.flags);
-    print_ip(packet.ciaddr);
-    print_ip(packet.yiaddr);
-    print_ip(packet.siaddr);
-    print_ip(packet.giaddr);
+    // print_ip(packet.ciaddr);
+    // print_ip(packet.yiaddr);
+    // print_ip(packet.siaddr);
+    // print_ip(packet.giaddr);
     // print_ip(packet.chaddr);
 }
 
-const DHCPDISCOVER: u8 = 1;
-const DHCPREQUEST: u8 = 3;
-const DHCPRELEASE: u8 = 7;
 
 fn dhcp_handler(packet: &DhcpPacket) {
+    if packet.op != BOOTREQUEST {
+        return;
+    }
     // dhcpのヘッダ読み取り
-    if let Some(message) = packet.get_option(MESSAGE_TYPE_CODE) {
+    if let Some(message) = packet.get_option(OPTION_MESSAGE_TYPE_CODE) {
         let message_type = message[0];
         match message_type {
             DHCPDISCOVER => {
                 println!("dhcp discover");
-                // make_dhcp_packet();
+                make_dhcp_packet(&packet, DHCPOFFER);
             },
 
             DHCPREQUEST => {
                 println!("dhcp request");
-
+                make_dhcp_packet(&packet, DHCPACK);
             },
 
             DHCPRELEASE => {
@@ -193,8 +218,27 @@ fn dhcp_handler(packet: &DhcpPacket) {
     // or リリース
 }
 
-fn make_dhcp_packet() {
-    let buffer = [0u8; DHCP_MINIMUM_SIZE];
-    let mut dhcp_packet = DhcpPacket::new(&buffer);
+const DHCP_SIZE:usize = 300;
+const OPTION_IP_ADDRESS_LEASE_TIME: u8 = 51;
+const OPTION_SERVER_IDENTIFIER: u8 = 54;
 
+fn make_dhcp_packet(packet: &DhcpPacket, message_type: u8) {
+    let buffer = [0u8; DHCP_SIZE];
+    let mut dhcp_packet = DhcpPacket::new(&buffer).unwrap();
+    dhcp_packet.op = BOOTREPLY;
+    dhcp_packet.htype = HTYPE_ETHER;
+    dhcp_packet.hlen = HLEN_MACADDR;
+    dhcp_packet.xid = packet.xid;
+    dhcp_packet.flags = if packet.giaddr != net::Ipv4Addr::new(0, 0, 0, 0) {
+        packet.flags
+    } else {
+        0
+    };
+    dhcp_packet.yiaddr = "192.168.11.88".parse().unwrap(); //TODO: IPプールを用意
+    dhcp_packet.chaddr = packet.chaddr;
+    dhcp_packet.options = Vec::new(); //option領域を初期化
+    dhcp_packet.set_option(OPTION_MESSAGE_TYPE_CODE, 1, &mut vec![message_type]);
+    dhcp_packet.set_option(OPTION_IP_ADDRESS_LEASE_TIME, 4, &mut vec![0,0,1,0]); //TODO: リースタイム変更
+    dhcp_packet.set_option(OPTION_SERVER_IDENTIFIER, 4, &mut vec![127, 0, 0, 1]);    
 }
+
