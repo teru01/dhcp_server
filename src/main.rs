@@ -42,7 +42,7 @@ struct DhcpPacket {
     chaddr:  u128, /* 28: client hardware address */
     sname:   [u8; 64], /* 44: optional server host name */
     file:    [u8; 128], /* 108: boot file name */
-    options: [u8; 312] /* 236: optionがどの用途に使われるのか? minで312 */
+    options: Vec<u8> /* 236: optionがどの用途に使われるのか? minで312 */
 }
 
 // fn create_ip(n: u32) -> [u8; 4]{
@@ -70,7 +70,7 @@ impl DhcpPacket {
             chaddr: NetworkEndian::read_u128(&buf[28..44]), /* 28: client hardware address */
             sname:   [0u8; 64], /* 44: optional server host name */
             file:    [0u8; 128], /* 108: boot file name */
-            options: [0u8; 312]
+            options: buf[236..].to_vec()
         };
         Some(packet)
     }
@@ -102,17 +102,17 @@ impl DhcpPacket {
 }
 
 fn main() {
-    let server_socket = net::UdpSocket::bind("127.0.0.1:12345")
+    let server_socket = net::UdpSocket::bind("0.0.0.0:67")
                            .expect("Failed to bind socket");
+    server_socket.set_broadcast(true).unwrap();
     loop {
         let mut buf = [0u8; 1024];
         match server_socket.recv_from(&mut buf) {
             Ok((size, src)) => {
-                println!("incoming connection from {}", src);
-                if size >= DHCP_MINIMUM_SIZE {
-                    if let Some(dhcp_packet) = DhcpPacket::new(&buf[..size]) {
-                        dhcp_handler(&dhcp_packet);
-                    }
+                println!("incoming data from {}/size: {}", src, size);
+                if let Some(dhcp_packet) = DhcpPacket::new(&buf[..size]) {
+                    // dump_dhcp_info(&dhcp_packet);
+                    dhcp_handler(&dhcp_packet);
                 }
 
                 // srcにsend_toして正しく送信できるのか・・・？
@@ -123,6 +123,29 @@ fn main() {
             }
         }
     }
+}
+
+fn print_ip(n: u32) {
+    let mut ip = [0u8; 4];
+    for i in 0..4 {
+        ip[i] = (n >> 8*(3-i) & 0xff) as u8;
+    }
+    println!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+}
+
+fn dump_dhcp_info(packet: &DhcpPacket) {
+    println!("op: {}", packet.op);
+    println!("htype: {}", packet.htype);
+    println!("hlen: {}", packet.hlen);
+    println!("hops: {}", packet.hops);
+    println!("xid: {}", packet.xid);
+    println!("secs: {}", packet.secs);
+    println!("flags: {}", packet.flags);
+    print_ip(packet.ciaddr);
+    print_ip(packet.yiaddr);
+    print_ip(packet.siaddr);
+    print_ip(packet.giaddr);
+    // print_ip(packet.chaddr);
 }
 
 const DHCPDISCOVER: u8 = 1;
@@ -149,9 +172,11 @@ fn dhcp_handler(packet: &DhcpPacket) {
             }
 
             _ => {
-
+                println!("else: {}", message_type);
             }
         }
+    } else {
+        println!("not found");
     }
     // DHCPoffer送信
 
