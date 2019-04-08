@@ -1,0 +1,7 @@
+{
+    "sshfs.configs": [
+        {
+            "name": "centos"
+        }
+    ]
+}
