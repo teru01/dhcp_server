@@ -1,8 +1,7 @@
 use pnet::transport::{self, TransportProtocol::Ipv4};
 use pnet::packet::ip;
 use pnet::datalink;
-use std::net;
-use std::str;
+use std::{ net, io, str };
 use byteorder::{ByteOrder, NetworkEndian, LittleEndian};
 /*
 TODO
@@ -146,7 +145,7 @@ fn main() {
                 println!("incoming data from {}/size: {}", src, size);
                 if let Some(dhcp_packet) = DhcpPacket::new(&buf[..size]) {
                     // dump_dhcp_info(&dhcp_packet);
-                    dhcp_handler(&dhcp_packet);
+                    dhcp_handler(&dhcp_packet, &server_socket, &src);
                 }
 
                 // srcにsend_toして正しく送信できるのか・・・？
@@ -182,8 +181,11 @@ fn dump_dhcp_info(packet: &DhcpPacket) {
     // print_ip(packet.chaddr);
 }
 
+unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+    ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
+}
 
-fn dhcp_handler(packet: &DhcpPacket) {
+fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAddr) {
     if packet.op != BOOTREQUEST {
         return;
     }
@@ -193,12 +195,19 @@ fn dhcp_handler(packet: &DhcpPacket) {
         match message_type {
             DHCPDISCOVER => {
                 println!("dhcp discover");
-                make_dhcp_packet(&packet, DHCPOFFER);
+                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPOFFER) {
+                    let payload = unsafe { any_as_u8_slice(&dhcp_packet) };
+                    // dump_payload(payload);
+                    soc.send_to(payload, *dest).expect("failed to send");
+                }
             },
 
             DHCPREQUEST => {
                 println!("dhcp request");
-                make_dhcp_packet(&packet, DHCPACK);
+                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPACK) {
+                    let payload = unsafe { any_as_u8_slice(&dhcp_packet) };
+                    soc.send_to(payload, *dest).expect("failed to send");
+                }
             },
 
             DHCPRELEASE => {
@@ -218,11 +227,35 @@ fn dhcp_handler(packet: &DhcpPacket) {
     // or リリース
 }
 
-const DHCP_SIZE:usize = 300;
+const DHCP_SIZE:usize = 400;
 const OPTION_IP_ADDRESS_LEASE_TIME: u8 = 51;
 const OPTION_SERVER_IDENTIFIER: u8 = 54;
 
-fn make_dhcp_packet(packet: &DhcpPacket, message_type: u8) {
+const WIDTH: usize = 20;
+
+fn dump_payload(payload: &[u8]) {
+    let len = payload.len();
+    for i in 0..len {
+        print!("{:<02X} ", payload[i]);
+        if i%WIDTH == WIDTH-1 || i == len-1 {
+            for _j in 0..WIDTH-1-(i % (WIDTH)) {
+                print!("   ");
+            }
+            print!("| ");
+            for j in i-i%WIDTH..i+1 {
+                if payload[j].is_ascii_alphabetic() {
+                    print!("{}", payload[j] as char);
+                } else {
+                    print!(".");
+                }
+            }
+            print!("\n");
+        }
+    }
+
+}
+
+fn make_dhcp_packet(packet: &DhcpPacket, message_type: u8) -> Result<DhcpPacket, io::Error>{
     let buffer = [0u8; DHCP_SIZE];
     let mut dhcp_packet = DhcpPacket::new(&buffer).unwrap();
     dhcp_packet.op = BOOTREPLY;
@@ -237,8 +270,12 @@ fn make_dhcp_packet(packet: &DhcpPacket, message_type: u8) {
     dhcp_packet.yiaddr = "192.168.11.88".parse().unwrap(); //TODO: IPプールを用意
     dhcp_packet.chaddr = packet.chaddr;
     dhcp_packet.options = Vec::new(); //option領域を初期化
+    dhcp_packet.options.append(&mut vec![0x63, 0x82, 0x53, 0x63]);
     dhcp_packet.set_option(OPTION_MESSAGE_TYPE_CODE, 1, &mut vec![message_type]);
     dhcp_packet.set_option(OPTION_IP_ADDRESS_LEASE_TIME, 4, &mut vec![0,0,1,0]); //TODO: リースタイム変更
-    dhcp_packet.set_option(OPTION_SERVER_IDENTIFIER, 4, &mut vec![127, 0, 0, 1]);    
+    dhcp_packet.set_option(OPTION_SERVER_IDENTIFIER, 4, &mut vec![127, 0, 0, 1]);
+
+    println!("set option");
+    Ok(dhcp_packet)
 }
 
