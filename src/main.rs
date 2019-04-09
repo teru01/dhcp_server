@@ -1,7 +1,7 @@
 use pnet::transport::{self, TransportProtocol::Ipv4};
 use pnet::packet::ip;
 use pnet::datalink;
-use std::{ net, io, str };
+use std::{ net, io, str, ptr };
 use byteorder::{ByteOrder, NetworkEndian, LittleEndian};
 /*
 TODO
@@ -10,11 +10,6 @@ DHCPパケットを作成してフィールドを埋める
 任意のDHCPメッセージを送信
 ブロードキャストされたDHCPリクエストに対して返信
 */
-extern crate bincode;
-#[macro_use]
-extern crate serde_derive;
-extern crate serde;
-
 
 const HTYPE_ETHER: u8 = 1;
 const HLEN_MACADDR: u8 = 6;
@@ -33,23 +28,39 @@ const DHCPRELEASE : u8 = 7;
 const BOOTREQUEST: u8 = 1;
 const BOOTREPLY: u8 = 2;
 
-#[derive(Serialize, Deserialize)]
-struct DhcpPacket {
-    op:      u8, /* 0: Message type */
-    htype:   u8, /* 1: Hardware addr type */
-    hlen:    u8, /* 2: Hardware addr length MACアドレスなら6で固定 */
-    hops:    u8, /* 3: agent hops from client */
-    xid:     u32, /* 4: Transaction ID */
-    secs:    u16, /* 8: seconds elapsed since client started to trying to boot */
-    flags:   u16, /* 10: flags */
-    ciaddr:  net::Ipv4Addr, /* 12: client ip addr 以前使っている値があるとき、それを通達する。リース延長のときなど */
-    yiaddr:  net::Ipv4Addr, /* 16: client ip addr */
-    siaddr:  net::Ipv4Addr, /* 20: ip addr of next server to use in bootstrap */
-    giaddr:  net::Ipv4Addr, /* 24: ip addr of relay agent */
-    chaddr:  [u8; 16], /* 28: client hardware address */
-    sname:   Vec<u8>, /* 44: optional server host name */
-    file:    Vec<u8>, /* 108: boot file name */
-    options: Vec<u8> /* 236: optionがどの用途に使われるのか? minで312 */
+const OP:      usize = 0;
+const HTYPE:   usize = 1;
+const HLEN:    usize = 2;
+const HOPS:    usize = 3;
+const XID:     usize = 4;
+const SECS:    usize = 8;
+const FLAGS:   usize = 10;
+const CIADDR:  usize = 12;
+const YIADDR:  usize = 16;
+const SIADDR:  usize = 20;
+const GIADDR:  usize = 24;
+const CHADDR:  usize = 28;
+const SNAME:   usize = 44;
+const FILE:    usize = 108;
+const OPTIONS: usize = 236;
+
+struct DhcpPacket<'a> {
+    buffer: &'a [u8],
+    // op:      u8, /* 0: Message type */
+    // htype:   u8, /* 1: Hardware addr type */
+    // hlen:    u8, /* 2: Hardware addr length MACアドレスなら6で固定 */
+    // hops:    u8, /* 3: agent hops from client */
+    // xid:     u32, /* 4: Transaction ID */
+    // secs:    u16, /* 8: seconds elapsed since client started to trying to boot */
+    // flags:   u16, /* 10: flags */
+    // ciaddr:  net::Ipv4Addr, /* 12: client ip addr 以前使っている値があるとき、それを通達する。リース延長のときなど */
+    // yiaddr:  net::Ipv4Addr, /* 16: client ip addr */
+    // siaddr:  net::Ipv4Addr, /* 20: ip addr of next server to use in bootstrap */
+    // giaddr:  net::Ipv4Addr, /* 24: ip addr of relay agent */
+    // chaddr:  [u8; 16], /* 28: client hardware address */
+    // sname:   Vec<u8>, /* 44: optional server host name */
+    // file:    Vec<u8>, /* 108: boot file name */
+    // options: Vec<u8> /* 236: optionがどの用途に使われるのか? minで312 */
 }
 
 fn create_ip(buf: &[u8]) -> net::Ipv4Addr {
@@ -64,51 +75,132 @@ fn create_macaddr(buf: &[u8]) -> [u8; 16] {
     ch
 }
 
-impl DhcpPacket {
+impl<'a> DhcpPacket<'a> {
     fn new(buf: &[u8]) -> Option<DhcpPacket>{
         let packet = DhcpPacket {
-            op:      buf[0],
-            htype:   buf[1],
-            hlen:    buf[2],
-            hops:    buf[3],
-            xid:     NetworkEndian::read_u32(&buf[4..8]),
-            secs:    NetworkEndian::read_u16(&buf[8..10]), /* 8: seconds elapsed since client started to trying to boot */
-            flags:   NetworkEndian::read_u16(&buf[10..12]), /* 10: flags */
-            ciaddr:  create_ip(&buf[12..16]), /* 12: client ip addr if already in use */
-            yiaddr:  create_ip(&buf[16..20]), /* 16: client ip addr */
-            siaddr:  create_ip(&buf[20..24]), /* 20: ip addr of next server to use in bootstrap */
-            giaddr:  create_ip(&buf[24..28]), /* 24: ip addr of relay agent */
-            chaddr:  create_macaddr(&buf[28..44]), /* 28: client hardware address */
-            sname:   buf[44..108].to_vec(), /* 44: optional server host name */
-            file:    buf[108..236].to_vec(), /* 108: boot file name */
-            options: buf[236..].to_vec()
+            buffer: buf
+            // op:      buf[0],
+            // htype:   buf[1],
+            // hlen:    buf[2],
+            // hops:    buf[3],
+            // xid:     NetworkEndian::read_u32(&buf[4..8]),
+            // secs:    NetworkEndian::read_u16(&buf[8..10]), /* 8: seconds elapsed since client started to trying to boot */
+            // flags:   NetworkEndian::read_u16(&buf[10..12]), /* 10: flags */
+            // ciaddr:  create_ip(&buf[12..16]), /* 12: client ip addr if already in use */
+            // yiaddr:  create_ip(&buf[16..20]), /* 16: client ip addr */
+            // siaddr:  create_ip(&buf[20..24]), /* 20: ip addr of next server to use in bootstrap */
+            // giaddr:  create_ip(&buf[24..28]), /* 24: ip addr of relay agent */
+            // chaddr:  create_macaddr(&buf[28..44]), /* 28: client hardware address */
+            // sname:   buf[44..108].to_vec(), /* 44: optional server host name */
+            // file:    buf[108..236].to_vec(), /* 108: boot file name */
+            // options: buf[236..].to_vec()
         };
         Some(packet)
     }
 
+    fn get_op(&self) -> u8 {
+        self.buffer[OP]
+    }
+
+    fn get_options(&self) -> &[u8] {
+        &self.buffer[OPTIONS..]
+    }
+
+    fn get_xid(&self) -> &[u8] {
+        &self.buffer[XID..SECS]
+    }
+
+    fn get_flags(&self) -> &[u8] {
+        &self.buffer[FLAGS..CIADDR]
+    }
+
+    fn get_giaddr(&self) -> net::Ipv4Addr {
+        let b = &self.buffer[GIADDR..CHADDR];
+        net::Ipv4Addr::new(b[0], b[1], b[2], b[3])
+    }
+
+    fn set_op(&mut self, op: u8) {
+        self.buffer[OP] = op;
+    }
+
+    fn set_htype(&mut self, htype: u8) {
+        self.buffer[HTYPE] = htype;
+    }
+
+    fn set_hlen(&mut self, hlen: u8) {
+        self.buffer[HLEN] = hlen;
+    }
+
+    fn set_xid(&mut self, xid: &[u8]) {
+        unsafe {
+            ptr::copy_nonoverlapping(xid.as_ptr(), self.buffer[XID..SECS].as_mut_ptr(), SECS - XID);
+        }
+    }
+
+    fn set_flags(&mut self, flags: &[u8]) {
+        unsafe {
+            ptr::copy_nonoverlapping(flags.as_ptr(), self.buffer[FLAGS..CIADDR].as_mut_ptr(), CIADDR - FLAGS);
+        }
+    }
+
+    fn set_yiaddr(&mut self, yiaddr: &net::Ipv4Addr) {
+        unsafe {
+            ptr::copy_nonoverlapping(yiaddr.octets().as_ptr(), self.buffer[YIADDR..SIADDR].as_mut_ptr(), SIADDR - YIADDR);
+        }
+    }
+
+    fn set_chaddr(&mut self, chaddr: &[u8]) {
+        unsafe {
+            ptr::copy_nonoverlapping(chaddr.as_ptr(), self.buffer[CHADDR..SNAME].as_mut_ptr(), SNAME - CHADDR);
+        }
+    }
+
+    fn set_option(&mut self, cursor: &mut usize, message_type: u8, len: usize, contents: &[u8]){
+        self.buffer[*cursor] = message_type;
+        self.buffer[*cursor + 1] = len as u8;
+        unsafe {
+            ptr::copy_nonoverlapping(contents.as_ptr(), self.buffer[*cursor+2..].as_mut_ptr(), len);
+        }
+        *cursor += 2 + len; //message_type + len + buffer;
+    }
+
+    fn set_magic_cookie(&mut self, cursor: &mut usize) {
+        unsafe {
+            ptr::copy_nonoverlapping([0x63, 0x82, 0x53, 0x63].as_ptr(), self.buffer[*cursor..].as_mut_ptr(), 4);
+        }
+        *cursor += 4;
+    }
+
+    // fn get_htype(&self) -> u8 {
+    //     self.buffer[1]
+    // }
+
+    // fn get_hlen(&self) -> u8 {
+    //     self.buffer[2]
+    // }
+
+    // fn get_hops(&self) -> u8 {
+    //     self.buffer[3]
+    // }
+
     //optionはcode, length, bufferの順に並んでいる
     fn get_option(&self, option_code: u8) -> Option<Vec<u8>> {
         let mut index = 4; // 最初の4バイトはクッキー
+        let options = self.get_options();
         while index < 255 {
-            if self.options[index] == option_code {
-                let len = self.options[index+1];
+            if options[index] == option_code {
+                let len = options[index+1];
                 let buf_index = index + 2;
-                let v = self.options[buf_index..buf_index+len as usize].to_vec();
+                let v = options[buf_index..buf_index+len as usize].to_vec();
                 return Some(v);
-            } else if self.options[index] == 0 {
+            } else if options[index] == 0 {
                 index += 1;
             } else {
-                let len = self.options[index+1];
+                let len = options[index+1];
                 index += 1 + len as usize;
             }
         }
         None
-    }
-
-    fn set_option(&mut self, code: u8, len: u8, buf: &mut Vec<u8>) {
-        self.options.push(code);
-        self.options.push(len);
-        self.options.append(buf);
     }
 }
 
@@ -145,13 +237,13 @@ fn print_ip(n: u32) {
 }
 
 fn dump_dhcp_info(packet: &DhcpPacket) {
-    println!("op: {}", packet.op);
-    println!("htype: {}", packet.htype);
-    println!("hlen: {}", packet.hlen);
-    println!("hops: {}", packet.hops);
-    println!("xid: {}", packet.xid);
-    println!("secs: {}", packet.secs);
-    println!("flags: {}", packet.flags);
+    // println!("op: {}", packet.op);
+    // println!("htype: {}", packet.htype);
+    // println!("hlen: {}", packet.hlen);
+    // println!("hops: {}", packet.hops);
+    // println!("xid: {}", packet.xid);
+    // println!("secs: {}", packet.secs);
+    // println!("flags: {}", packet.flags);
     // print_ip(packet.ciaddr);
     // print_ip(packet.yiaddr);
     // print_ip(packet.siaddr);
@@ -164,20 +256,21 @@ unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 }
 
 fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAddr) {
-    if packet.op != BOOTREQUEST {
+    if packet.get_op() != BOOTREQUEST {
         return;
     }
     // dhcpのヘッダ読み取り
     if let Some(message) = packet.get_option(OPTION_MESSAGE_TYPE_CODE) {
         let message_type = message[0];
+        let mut packet_buffer = [0u8; DHCP_SIZE];
         match message_type {
             DHCPDISCOVER => {
                 println!("dhcp discover");
-                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPOFFER) {
-                    // let payload = unsafe { any_as_u8_slice(&dhcp_packet) };
+                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer) {
+                    let payload = dhcp_packet.buffer;
                     // dump_payload(payload);
-                    let payload = bincode::serialize(&dhcp_packet).unwrap();
-                    soc.send_to(payload.as_slice(), *dest).expect("failed to send");
+                    // let payload = bincode::serialize(&dhcp_packet).unwrap();
+                    soc.send_to(payload, *dest).expect("failed to send");
                 }
             },
 
@@ -234,21 +327,29 @@ fn dump_payload(payload: &[u8]) {
 
 }
 
-fn make_dhcp_packet(packet: &DhcpPacket, message_type: u8) -> Result<DhcpPacket, io::Error>{
-    let buffer = [0u8; DHCP_SIZE];
+fn make_dhcp_packet<'a>(incoming_packet: &DhcpPacket, message_type: u8, buffer: &'a mut [u8]) -> Result<DhcpPacket<'a>, io::Error>{
     let mut dhcp_packet = DhcpPacket::new(&buffer).unwrap();
-    dhcp_packet.op = BOOTREPLY;
-    dhcp_packet.htype = HTYPE_ETHER;
-    dhcp_packet.hlen = HLEN_MACADDR;
-    dhcp_packet.xid = packet.xid;
-    dhcp_packet.flags = if packet.giaddr != net::Ipv4Addr::new(0, 0, 0, 0) {
-        packet.flags
+    dhcp_packet.set_op(BOOTREPLY);
+    dhcp_packet.set_htype(HTYPE_ETHER);
+    dhcp_packet.set_hlen(HLEN_MACADDR);
+    dhcp_packet.set_xid(incoming_packet.get_xid());
+    let response_flag = if incoming_packet.giaddr != net::Ipv4Addr::new(0, 0, 0, 0) {
+        incoming_packet.get_flags()
     } else {
-        0
+        &[0]
+    };
+
+    if incoming_packet.giaddr != net::Ipv4Addr::new(0, 0, 0, 0) {
+        dhcp_packet.set_flags(incoming_packet.get_flags());
+    } else {
+        dhcp_packet.set_flags(flags: &[u8])
     };
     dhcp_packet.yiaddr = "192.168.11.88".parse().unwrap(); //TODO: IPプールを用意
-    dhcp_packet.chaddr = packet.chaddr;
+    dhcp_packet.chaddr = incoming_packet.chaddr;
     dhcp_packet.options = Vec::new(); //option領域を初期化
+
+    let mut cursor = OPTIONS;
+    dhcp_packet.set_magic_cookie(&mut cursor);
     dhcp_packet.options.append(&mut vec![0x63, 0x82, 0x53, 0x63]);
     dhcp_packet.set_option(OPTION_MESSAGE_TYPE_CODE, 1, &mut vec![message_type]);
     dhcp_packet.set_option(OPTION_IP_ADDRESS_LEASE_TIME, 4, &mut vec![0,0,1,0]); //TODO: リースタイム変更
