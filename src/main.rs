@@ -17,6 +17,13 @@ const HLEN_MACADDR: u8 = 6;
 const DHCP_MINIMUM_SIZE: usize = 548;
 const OPTION_MESSAGE_TYPE_CODE: u8 = 53;
 
+const DHCP_SIZE:usize = 400;
+const OPTION_IP_ADDRESS_LEASE_TIME: u8 = 51;
+const OPTION_SERVER_IDENTIFIER: u8 = 54;
+const OPTION_END: u8 = 255;
+
+const WIDTH: usize = 20;
+
 const DHCPDISCOVER: u8 = 1;
 const DHCPOFFER   : u8 = 2;
 const DHCPREQUEST : u8 = 3;
@@ -159,11 +166,17 @@ impl<'a> DhcpPacket<'a> {
         }
     }
 
-    fn set_option(&mut self, cursor: &mut usize, message_type: u8, len: usize, contents: &[u8]){
+    fn set_option(&mut self, cursor: &mut usize, message_type: u8, len: usize, contents: Option<&[u8]>){
         self.buffer[*cursor] = message_type;
+        if message_type == OPTION_END {
+            return;
+        }
         self.buffer[*cursor + 1] = len as u8;
-        unsafe {
-            ptr::copy_nonoverlapping(contents.as_ptr(), self.buffer[*cursor+2..].as_mut_ptr(), len);
+
+        if let Some(contents) = contents {
+            unsafe {
+                ptr::copy_nonoverlapping(contents.as_ptr(), self.buffer[*cursor+2..].as_mut_ptr(), len);
+            }
         }
         *cursor += 2 + len; //message_type + len + buffer;
     }
@@ -189,9 +202,9 @@ impl<'a> DhcpPacket<'a> {
 
     //optionはcode, length, bufferの順に並んでいる
     fn get_option(&self, option_code: u8) -> Option<Vec<u8>> {
-        let mut index = 4; // 最初の4バイトはクッキー
+        let mut index: usize = 4; // 最初の4バイトはクッキー
         let options = self.get_options();
-        while index < 255 {
+        while index < OPTION_END as usize {
             if options[index] == option_code {
                 let len = options[index+1];
                 let buf_index = index + 2;
@@ -275,6 +288,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAdd
                     // dump_payload(payload);
                     // let payload = bincode::serialize(&dhcp_packet).unwrap();
                     soc.send_to(dhcp_packet.buffer, *dest).expect("failed to send");
+                    println!("send dhcp offer");
                 }
             },
 
@@ -302,11 +316,6 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAdd
     // or リリース
 }
 
-const DHCP_SIZE:usize = 400;
-const OPTION_IP_ADDRESS_LEASE_TIME: u8 = 51;
-const OPTION_SERVER_IDENTIFIER: u8 = 54;
-
-const WIDTH: usize = 20;
 
 fn dump_payload(payload: &[u8]) {
     let len = payload.len();
@@ -344,10 +353,10 @@ fn make_dhcp_packet<'a>(incoming_packet: &DhcpPacket, message_type: u8, buffer: 
 
     let mut cursor = OPTIONS;
     dhcp_packet.set_magic_cookie(&mut cursor);
-    dhcp_packet.set_option(&mut cursor, OPTION_MESSAGE_TYPE_CODE, 1, &mut vec![message_type]);
-    dhcp_packet.set_option(&mut cursor, OPTION_IP_ADDRESS_LEASE_TIME, 4, &mut vec![0,0,1,0]); //TODO: リースタイム変更
-    dhcp_packet.set_option(&mut cursor, OPTION_SERVER_IDENTIFIER, 4, &mut vec![127, 0, 0, 1]);
-
+    dhcp_packet.set_option(&mut cursor, OPTION_MESSAGE_TYPE_CODE, 1, Some(&mut vec![message_type]));
+    dhcp_packet.set_option(&mut cursor, OPTION_IP_ADDRESS_LEASE_TIME, 4, Some(&mut vec![0,0,1,0])); //TODO: リースタイム変更
+    dhcp_packet.set_option(&mut cursor, OPTION_SERVER_IDENTIFIER, 4, Some(&mut vec![127, 0, 0, 1]));
+    dhcp_packet.set_option(&mut cursor, OPTION_END, 0, None);
     Ok(dhcp_packet)
 }
 
