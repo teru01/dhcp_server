@@ -45,7 +45,7 @@ const FILE:    usize = 108;
 const OPTIONS: usize = 236;
 
 struct DhcpPacket<'a> {
-    buffer: &'a [u8],
+    buffer: &'a mut [u8],
     // op:      u8, /* 0: Message type */
     // htype:   u8, /* 1: Hardware addr type */
     // hlen:    u8, /* 2: Hardware addr length MACアドレスなら6で固定 */
@@ -76,7 +76,7 @@ fn create_macaddr(buf: &[u8]) -> [u8; 16] {
 }
 
 impl<'a> DhcpPacket<'a> {
-    fn new(buf: &[u8]) -> Option<DhcpPacket>{
+    fn new(buf: &mut [u8]) -> Option<DhcpPacket>{
         let packet = DhcpPacket {
             buffer: buf
             // op:      buf[0],
@@ -117,6 +117,10 @@ impl<'a> DhcpPacket<'a> {
     fn get_giaddr(&self) -> net::Ipv4Addr {
         let b = &self.buffer[GIADDR..CHADDR];
         net::Ipv4Addr::new(b[0], b[1], b[2], b[3])
+    }
+
+    fn get_chaddr(&self) -> &[u8] {
+        &self.buffer[CHADDR..SNAME]
     }
 
     fn set_op(&mut self, op: u8) {
@@ -213,7 +217,7 @@ fn main() {
         match server_socket.recv_from(&mut buf) {
             Ok((size, src)) => {
                 println!("incoming data from {}/size: {}", src, size);
-                if let Some(dhcp_packet) = DhcpPacket::new(&buf[..size]) {
+                if let Some(dhcp_packet) = DhcpPacket::new(&mut buf[..size]) {
                     // dump_dhcp_info(&dhcp_packet);
                     dhcp_handler(&dhcp_packet, &server_socket, &src);
                 }
@@ -267,18 +271,17 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAdd
             DHCPDISCOVER => {
                 println!("dhcp discover");
                 if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer) {
-                    let payload = dhcp_packet.buffer;
+                    // let payload = dhcp_packet.buffer;
                     // dump_payload(payload);
                     // let payload = bincode::serialize(&dhcp_packet).unwrap();
-                    soc.send_to(payload, *dest).expect("failed to send");
+                    soc.send_to(dhcp_packet.buffer, *dest).expect("failed to send");
                 }
             },
 
             DHCPREQUEST => {
                 println!("dhcp request");
-                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPACK) {
-                    let payload = unsafe { any_as_u8_slice(&dhcp_packet) };
-                    soc.send_to(payload, *dest).expect("failed to send");
+                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPACK, &mut packet_buffer) {
+                    soc.send_to(dhcp_packet.buffer, *dest).expect("failed to send");
                 }
             },
 
@@ -328,34 +331,23 @@ fn dump_payload(payload: &[u8]) {
 }
 
 fn make_dhcp_packet<'a>(incoming_packet: &DhcpPacket, message_type: u8, buffer: &'a mut [u8]) -> Result<DhcpPacket<'a>, io::Error>{
-    let mut dhcp_packet = DhcpPacket::new(&buffer).unwrap();
+    let mut dhcp_packet = DhcpPacket::new(buffer).unwrap();
     dhcp_packet.set_op(BOOTREPLY);
     dhcp_packet.set_htype(HTYPE_ETHER);
     dhcp_packet.set_hlen(HLEN_MACADDR);
     dhcp_packet.set_xid(incoming_packet.get_xid());
-    let response_flag = if incoming_packet.giaddr != net::Ipv4Addr::new(0, 0, 0, 0) {
-        incoming_packet.get_flags()
-    } else {
-        &[0]
-    };
-
-    if incoming_packet.giaddr != net::Ipv4Addr::new(0, 0, 0, 0) {
+    if incoming_packet.get_giaddr() != net::Ipv4Addr::new(0, 0, 0, 0) {
         dhcp_packet.set_flags(incoming_packet.get_flags());
-    } else {
-        dhcp_packet.set_flags(flags: &[u8])
-    };
-    dhcp_packet.yiaddr = "192.168.11.88".parse().unwrap(); //TODO: IPプールを用意
-    dhcp_packet.chaddr = incoming_packet.chaddr;
-    dhcp_packet.options = Vec::new(); //option領域を初期化
+    }
+    dhcp_packet.set_yiaddr(&"192.168.11.88".parse().unwrap()); //TODO: IPプールを用意
+    dhcp_packet.set_chaddr(incoming_packet.get_chaddr());
 
     let mut cursor = OPTIONS;
     dhcp_packet.set_magic_cookie(&mut cursor);
-    dhcp_packet.options.append(&mut vec![0x63, 0x82, 0x53, 0x63]);
-    dhcp_packet.set_option(OPTION_MESSAGE_TYPE_CODE, 1, &mut vec![message_type]);
-    dhcp_packet.set_option(OPTION_IP_ADDRESS_LEASE_TIME, 4, &mut vec![0,0,1,0]); //TODO: リースタイム変更
-    dhcp_packet.set_option(OPTION_SERVER_IDENTIFIER, 4, &mut vec![127, 0, 0, 1]);
+    dhcp_packet.set_option(&mut cursor, OPTION_MESSAGE_TYPE_CODE, 1, &mut vec![message_type]);
+    dhcp_packet.set_option(&mut cursor, OPTION_IP_ADDRESS_LEASE_TIME, 4, &mut vec![0,0,1,0]); //TODO: リースタイム変更
+    dhcp_packet.set_option(&mut cursor, OPTION_SERVER_IDENTIFIER, 4, &mut vec![127, 0, 0, 1]);
 
-    println!("set option");
     Ok(dhcp_packet)
 }
 
