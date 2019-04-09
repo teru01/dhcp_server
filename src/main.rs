@@ -10,16 +10,11 @@ DHCPパケットを作成してフィールドを埋める
 任意のDHCPメッセージを送信
 ブロードキャストされたDHCPリクエストに対して返信
 */
+extern crate bincode;
+#[macro_use]
+extern crate serde_derive;
+extern crate serde;
 
-
-enum MessageType {
-    BOOTREQUEST = 1,
-    BOOTREPLY = 2
-}
-
-enum Htype {
-    ETHER = 1,
-}
 
 const HTYPE_ETHER: u8 = 1;
 const HLEN_MACADDR: u8 = 6;
@@ -38,8 +33,7 @@ const DHCPRELEASE : u8 = 7;
 const BOOTREQUEST: u8 = 1;
 const BOOTREPLY: u8 = 2;
 
-
-// 全体で548oc以上
+#[derive(Serialize, Deserialize)]
 struct DhcpPacket {
     op:      u8, /* 0: Message type */
     htype:   u8, /* 1: Hardware addr type */
@@ -52,9 +46,9 @@ struct DhcpPacket {
     yiaddr:  net::Ipv4Addr, /* 16: client ip addr */
     siaddr:  net::Ipv4Addr, /* 20: ip addr of next server to use in bootstrap */
     giaddr:  net::Ipv4Addr, /* 24: ip addr of relay agent */
-    chaddr:  datalink::MacAddr, /* 28: client hardware address */
-    sname:   [u8; 64], /* 44: optional server host name */
-    file:    [u8; 128], /* 108: boot file name */
+    chaddr:  [u8; 16], /* 28: client hardware address */
+    sname:   Vec<u8>, /* 44: optional server host name */
+    file:    Vec<u8>, /* 108: boot file name */
     options: Vec<u8> /* 236: optionがどの用途に使われるのか? minで312 */
 }
 
@@ -62,51 +56,35 @@ fn create_ip(buf: &[u8]) -> net::Ipv4Addr {
     net::Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3])
 }
 
-fn create_macaddr(buf: &[u8]) -> datalink::MacAddr {
-    datalink::MacAddr::new(buf[0], buf[1], buf[2], buf[3], buf[4], buf[5])
+fn create_macaddr(buf: &[u8]) -> [u8; 16] {
+    let mut ch = [0u8; 16];
+    for i in 0..6 {
+        ch[i] = buf[i];
+    }
+    ch
 }
 
 impl DhcpPacket {
     fn new(buf: &[u8]) -> Option<DhcpPacket>{
         let packet = DhcpPacket {
-            op:     buf[0],
-            htype:  buf[1],
-            hlen:   buf[2],
-            hops:   buf[3],
-            xid:    NetworkEndian::read_u32(&buf[4..8]),
-            secs:   NetworkEndian::read_u16(&buf[8..10]), /* 8: seconds elapsed since client started to trying to boot */
-            flags:  NetworkEndian::read_u16(&buf[10..12]), /* 10: flags */
-            ciaddr: create_ip(&buf[12..16]), /* 12: client ip addr if already in use */
-            yiaddr: create_ip(&buf[16..20]), /* 16: client ip addr */
-            siaddr: create_ip(&buf[20..24]), /* 20: ip addr of next server to use in bootstrap */
-            giaddr: create_ip(&buf[24..28]), /* 24: ip addr of relay agent */
-            chaddr: create_macaddr(&buf[28..44]), /* 28: client hardware address */
-            sname:   [0u8; 64], /* 44: optional server host name */
-            file:    [0u8; 128], /* 108: boot file name */
+            op:      buf[0],
+            htype:   buf[1],
+            hlen:    buf[2],
+            hops:    buf[3],
+            xid:     NetworkEndian::read_u32(&buf[4..8]),
+            secs:    NetworkEndian::read_u16(&buf[8..10]), /* 8: seconds elapsed since client started to trying to boot */
+            flags:   NetworkEndian::read_u16(&buf[10..12]), /* 10: flags */
+            ciaddr:  create_ip(&buf[12..16]), /* 12: client ip addr if already in use */
+            yiaddr:  create_ip(&buf[16..20]), /* 16: client ip addr */
+            siaddr:  create_ip(&buf[20..24]), /* 20: ip addr of next server to use in bootstrap */
+            giaddr:  create_ip(&buf[24..28]), /* 24: ip addr of relay agent */
+            chaddr:  create_macaddr(&buf[28..44]), /* 28: client hardware address */
+            sname:   buf[44..108].to_vec(), /* 44: optional server host name */
+            file:    buf[108..236].to_vec(), /* 108: boot file name */
             options: buf[236..].to_vec()
         };
         Some(packet)
     }
-
-    // fn create() -> DhcpPacket {
-    //     DhcpPacket {
-    //         op:     0,
-    //         htype:  0,
-    //         hlen:   0,
-    //         hops:   0,
-    //         xid:    0,
-    //         secs:   0, /* 8: seconds elapsed since client started to trying to boot */
-    //         flags:  0, /* 10: flags */
-    //         ciaddr: create_ip(&buf[12..16]), /* 12: client ip addr if already in use */
-    //         yiaddr: create_ip(&buf[16..20]), /* 16: client ip addr */
-    //         siaddr: create_ip(&buf[20..24]), /* 20: ip addr of next server to use in bootstrap */
-    //         giaddr: create_ip(&buf[24..28]), /* 24: ip addr of relay agent */
-    //         chaddr: create_macaddr(&buf[28..44]), /* 28: client hardware address */
-    //         sname:   [0u8; 64], /* 44: optional server host name */
-    //         file:    [0u8; 128], /* 108: boot file name */
-    //         options: buf[236..].to_vec()
-    //     }
-    // }
 
     //optionはcode, length, bufferの順に並んでいる
     fn get_option(&self, option_code: u8) -> Option<Vec<u8>> {
@@ -196,9 +174,10 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAdd
             DHCPDISCOVER => {
                 println!("dhcp discover");
                 if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPOFFER) {
-                    let payload = unsafe { any_as_u8_slice(&dhcp_packet) };
+                    // let payload = unsafe { any_as_u8_slice(&dhcp_packet) };
                     // dump_payload(payload);
-                    soc.send_to(payload, *dest).expect("failed to send");
+                    let payload = bincode::serialize(&dhcp_packet).unwrap();
+                    soc.send_to(payload.as_slice(), *dest).expect("failed to send");
                 }
             },
 
