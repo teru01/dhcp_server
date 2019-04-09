@@ -232,7 +232,7 @@ fn main() {
                 println!("incoming data from {}/size: {}", src, size);
                 if let Some(dhcp_packet) = DhcpPacket::new(&mut buf[..size]) {
                     // dump_dhcp_info(&dhcp_packet);
-                    dhcp_handler(&dhcp_packet, &server_socket, &src);
+                    dhcp_handler(&dhcp_packet, &server_socket);
                 }
 
                 // srcにsend_toして正しく送信できるのか・・・？
@@ -268,11 +268,9 @@ fn dump_dhcp_info(packet: &DhcpPacket) {
     // print_ip(packet.chaddr);
 }
 
-unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-    ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
-}
 
-fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAddr) {
+
+fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
     if packet.get_op() != BOOTREQUEST {
         return;
     }
@@ -280,6 +278,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAdd
     if let Some(message) = packet.get_option(OPTION_MESSAGE_TYPE_CODE) {
         let message_type = message[0];
         let mut packet_buffer = [0u8; DHCP_SIZE];
+        let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap();
         match message_type {
             DHCPDISCOVER => {
                 println!("dhcp discover");
@@ -287,7 +286,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAdd
                     // let payload = dhcp_packet.buffer;
                     // dump_payload(payload);
                     // let payload = bincode::serialize(&dhcp_packet).unwrap();
-                    soc.send_to(dhcp_packet.buffer, *dest).expect("failed to send");
+                    soc.send_to(dhcp_packet.buffer, dest).expect("failed to send");
                     println!("send dhcp offer");
                 }
             },
@@ -295,7 +294,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dest: &net::SocketAdd
             DHCPREQUEST => {
                 println!("dhcp request");
                 if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPACK, &mut packet_buffer) {
-                    soc.send_to(dhcp_packet.buffer, *dest).expect("failed to send");
+                    soc.send_to(dhcp_packet.buffer, dest).expect("failed to send");
                 }
             },
 
