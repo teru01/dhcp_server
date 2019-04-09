@@ -1,8 +1,19 @@
 use pnet::transport::{self, TransportProtocol::Ipv4};
-use pnet::packet::ip;
+use pnet::packet;
 use pnet::datalink;
 use std::{ net, io, str, ptr };
 use byteorder::{ByteOrder, NetworkEndian, LittleEndian};
+use pnet::datalink::Channel::Ethernet;
+
+use pnet::datalink::{Channel, MacAddr, NetworkInterface, ParseMacAddrErr};
+
+use pnet::packet::arp::{ArpHardwareTypes, ArpOperations};
+use pnet::packet::arp::{ArpPacket, MutableArpPacket};
+use pnet::packet::ethernet::{ EtherTypes, EthernetPacket };
+use pnet::packet::ethernet::MutableEthernetPacket;
+use pnet::packet::{MutablePacket, Packet};
+
+
 /*
 TODO
 バイト列からDHCPパケットの生成
@@ -53,54 +64,12 @@ const OPTIONS: usize = 236;
 
 struct DhcpPacket<'a> {
     buffer: &'a mut [u8],
-    // op:      u8, /* 0: Message type */
-    // htype:   u8, /* 1: Hardware addr type */
-    // hlen:    u8, /* 2: Hardware addr length MACアドレスなら6で固定 */
-    // hops:    u8, /* 3: agent hops from client */
-    // xid:     u32, /* 4: Transaction ID */
-    // secs:    u16, /* 8: seconds elapsed since client started to trying to boot */
-    // flags:   u16, /* 10: flags */
-    // ciaddr:  net::Ipv4Addr, /* 12: client ip addr 以前使っている値があるとき、それを通達する。リース延長のときなど */
-    // yiaddr:  net::Ipv4Addr, /* 16: client ip addr */
-    // siaddr:  net::Ipv4Addr, /* 20: ip addr of next server to use in bootstrap */
-    // giaddr:  net::Ipv4Addr, /* 24: ip addr of relay agent */
-    // chaddr:  [u8; 16], /* 28: client hardware address */
-    // sname:   Vec<u8>, /* 44: optional server host name */
-    // file:    Vec<u8>, /* 108: boot file name */
-    // options: Vec<u8> /* 236: optionがどの用途に使われるのか? minで312 */
-}
-
-fn create_ip(buf: &[u8]) -> net::Ipv4Addr {
-    net::Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3])
-}
-
-fn create_macaddr(buf: &[u8]) -> [u8; 16] {
-    let mut ch = [0u8; 16];
-    for i in 0..6 {
-        ch[i] = buf[i];
-    }
-    ch
 }
 
 impl<'a> DhcpPacket<'a> {
     fn new(buf: &mut [u8]) -> Option<DhcpPacket>{
         let packet = DhcpPacket {
             buffer: buf
-            // op:      buf[0],
-            // htype:   buf[1],
-            // hlen:    buf[2],
-            // hops:    buf[3],
-            // xid:     NetworkEndian::read_u32(&buf[4..8]),
-            // secs:    NetworkEndian::read_u16(&buf[8..10]), /* 8: seconds elapsed since client started to trying to boot */
-            // flags:   NetworkEndian::read_u16(&buf[10..12]), /* 10: flags */
-            // ciaddr:  create_ip(&buf[12..16]), /* 12: client ip addr if already in use */
-            // yiaddr:  create_ip(&buf[16..20]), /* 16: client ip addr */
-            // siaddr:  create_ip(&buf[20..24]), /* 20: ip addr of next server to use in bootstrap */
-            // giaddr:  create_ip(&buf[24..28]), /* 24: ip addr of relay agent */
-            // chaddr:  create_macaddr(&buf[28..44]), /* 28: client hardware address */
-            // sname:   buf[44..108].to_vec(), /* 44: optional server host name */
-            // file:    buf[108..236].to_vec(), /* 108: boot file name */
-            // options: buf[236..].to_vec()
         };
         Some(packet)
     }
@@ -221,6 +190,60 @@ impl<'a> DhcpPacket<'a> {
     }
 }
 
+fn is_ipaddr_already_in_use(interface_name: String, dhcp_server_addr: net::Ipv4Addr, target_ip: net::Ipv4Addr) -> bool {
+    let interfaces = datalink::interfaces();
+    let interface = interfaces.into_iter()
+                              .filter(|iface| iface.name == interface_name)
+                              .next()
+                              .expect("Failed to get interface");
+    
+    let (mut tx, mut rx) = match datalink::channel(&interface, Default::default()) {
+        Ok(Ethernet(tx, rx)) => (tx, rx),
+        Ok(_) => panic!("Unhandled channel type"),
+        Err(e) => {
+            panic!("Failed to create datalink channel {}", e)
+        }
+    };
+
+    let mut ethernet_buffer = [0u8; 42];
+    let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
+
+    ethernet_packet.set_destination(MacAddr::broadcast());
+    ethernet_packet.set_source(interface.mac_address());
+    ethernet_packet.set_ethertype(EtherTypes::Arp);
+
+    let mut arp_buffer = [0u8; 28];
+    let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
+
+    arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+    arp_packet.set_protocol_type(EtherTypes::Ipv4);
+    arp_packet.set_hw_addr_len(6);
+    arp_packet.set_proto_addr_len(4);
+    arp_packet.set_operation(ArpOperations::Request);
+    arp_packet.set_sender_hw_addr(interface.mac_address());
+    arp_packet.set_sender_proto_addr(dhcp_server_addr);
+    arp_packet.set_target_hw_addr(MacAddr::zero());
+    arp_packet.set_target_proto_addr(target_ip);
+
+    ethernet_packet.set_payload(arp_packet.packet_mut());
+
+    tx.send_to(ethernet_packet.packet(), None).unwrap();
+    println!("sent ARP query");
+
+    match rx.next() {
+        Ok(frame) => {
+            let frame = EthernetPacket::new(frame).unwrap();
+            if frame.get_ethertype() == EtherTypes::Arp {
+                let arp_packet = ArpPacket::new(frame.payload()).unwrap();
+            }
+        },
+        Err(e) => {
+            panic!("Failed to read response: {}", e);
+        }
+    }
+
+}
+
 fn main() {
     let server_socket = net::UdpSocket::bind("0.0.0.0:67")
                            .expect("Failed to bind socket");
@@ -243,14 +266,6 @@ fn main() {
             }
         }
     }
-}
-
-fn print_ip(n: u32) {
-    let mut ip = [0u8; 4];
-    for i in 0..4 {
-        ip[i] = (n >> 8*(3-i) & 0xff) as u8;
-    }
-    println!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
 }
 
 fn dump_dhcp_info(packet: &DhcpPacket) {
@@ -309,33 +324,6 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
     } else {
         println!("not found");
     }
-    // DHCPoffer送信
-
-    // or DHCPACK送信
-    // or リリース
-}
-
-
-fn dump_payload(payload: &[u8]) {
-    let len = payload.len();
-    for i in 0..len {
-        print!("{:<02X} ", payload[i]);
-        if i%WIDTH == WIDTH-1 || i == len-1 {
-            for _j in 0..WIDTH-1-(i % (WIDTH)) {
-                print!("   ");
-            }
-            print!("| ");
-            for j in i-i%WIDTH..i+1 {
-                if payload[j].is_ascii_alphabetic() {
-                    print!("{}", payload[j] as char);
-                } else {
-                    print!(".");
-                }
-            }
-            print!("\n");
-        }
-    }
-
 }
 
 fn make_dhcp_packet<'a>(incoming_packet: &DhcpPacket, message_type: u8, buffer: &'a mut [u8]) -> Result<DhcpPacket<'a>, io::Error>{
