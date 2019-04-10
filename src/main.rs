@@ -2,7 +2,8 @@ use pnet::transport::{self, TransportProtocol::Ipv4};
 use pnet::packet;
 use pnet::datalink;
 use std::{ net, io, str, ptr };
-use byteorder::{ByteOrder, NetworkEndian, LittleEndian};
+use std::net::Ipv4Addr;
+use std::thread;
 use pnet::datalink::Channel::Ethernet;
 
 use pnet::datalink::{Channel, MacAddr, NetworkInterface, ParseMacAddrErr};
@@ -13,6 +14,8 @@ use pnet::packet::ethernet::{ EtherTypes, EthernetPacket };
 use pnet::packet::ethernet::MutableEthernetPacket;
 use pnet::packet::{MutablePacket, Packet};
 
+use std::sync::mpsc;
+use std::time::Duration;
 
 /*
 TODO
@@ -90,9 +93,9 @@ impl<'a> DhcpPacket<'a> {
         &self.buffer[FLAGS..CIADDR]
     }
 
-    fn get_giaddr(&self) -> net::Ipv4Addr {
+    fn get_giaddr(&self) -> Ipv4Addr {
         let b = &self.buffer[GIADDR..CHADDR];
-        net::Ipv4Addr::new(b[0], b[1], b[2], b[3])
+        Ipv4Addr::new(b[0], b[1], b[2], b[3])
     }
 
     fn get_chaddr(&self) -> &[u8] {
@@ -123,7 +126,7 @@ impl<'a> DhcpPacket<'a> {
         }
     }
 
-    fn set_yiaddr(&mut self, yiaddr: &net::Ipv4Addr) {
+    fn set_yiaddr(&mut self, yiaddr: &Ipv4Addr) {
         unsafe {
             ptr::copy_nonoverlapping(yiaddr.octets().as_ptr(), self.buffer[YIADDR..SIADDR].as_mut_ptr(), SIADDR - YIADDR);
         }
@@ -190,13 +193,19 @@ impl<'a> DhcpPacket<'a> {
     }
 }
 
-fn is_ipaddr_already_in_use(interface_name: String, dhcp_server_addr: net::Ipv4Addr, target_ip: net::Ipv4Addr) -> bool {
+#[test]
+fn test_is_ip_use() {
+    assert_eq!(true, is_ipaddr_already_in_use("en0".to_string(), "192.168.11.22".parse().unwrap(), "192.168.11.1".parse().unwrap()));
+}
+
+// TODO: IPが使用中かどうかいちいちチャンネル立ち上げて確認するのは効率悪い
+fn is_ipaddr_already_in_use(interface_name: String, dhcp_server_addr: Ipv4Addr, target_ip: Ipv4Addr) -> bool {
     let interfaces = datalink::interfaces();
     let interface = interfaces.into_iter()
                               .filter(|iface| iface.name == interface_name)
                               .next()
                               .expect("Failed to get interface");
-    
+
     let (mut tx, mut rx) = match datalink::channel(&interface, Default::default()) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("Unhandled channel type"),
@@ -230,19 +239,36 @@ fn is_ipaddr_already_in_use(interface_name: String, dhcp_server_addr: net::Ipv4A
     tx.send_to(ethernet_packet.packet(), None).unwrap();
     println!("sent ARP query");
 
-    match rx.next() {
-        Ok(frame) => {
-            let frame = EthernetPacket::new(frame).unwrap();
-            if frame.get_ethertype() == EtherTypes::Arp {
-                let arp_packet = ArpPacket::new(frame.payload()).unwrap();
+    //受信処理：rx.next でパケットが届くまで待機、s秒後に再開
+    // rx.try_clone()
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        loop {
+            match rx.next() {
+                Ok(frame) => {
+                    let frame = EthernetPacket::new(frame).unwrap();
+                    if frame.get_ethertype() == EtherTypes::Arp {
+                        let arp_packet = ArpPacket::new(frame.payload()).unwrap();
+                        if arp_packet.get_operation() == ArpOperations::Reply {
+                            // アドレスは使用されている。
+                            // タイムアウト後にARPを受信するか、DHCP受信スレッドが終了すればこのスレッドは終了する。
+                            if sender.send(true).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                },
+                _ => {}
             }
-        },
-        Err(e) => {
-            panic!("Failed to read response: {}", e);
         }
-    }
+    });
 
+    if let Ok(_) = receiver.recv_timeout(Duration::from_secs(1)) {
+        return true;
+    }
+    return false;
 }
+
 
 fn main() {
     let server_socket = net::UdpSocket::bind("0.0.0.0:67")
@@ -250,14 +276,16 @@ fn main() {
     server_socket.set_broadcast(true).unwrap();
     loop {
         let mut buf = [0u8; 1024];
+        let client_socket = server_socket.try_clone().expect("Failed to create client socket");
         match server_socket.recv_from(&mut buf) {
             Ok((size, src)) => {
                 println!("incoming data from {}/size: {}", src, size);
-                if let Some(dhcp_packet) = DhcpPacket::new(&mut buf[..size]) {
-                    // dump_dhcp_info(&dhcp_packet);
-                    dhcp_handler(&dhcp_packet, &server_socket);
-                }
-
+                thread::spawn(move || {
+                    if let Some(dhcp_packet) = DhcpPacket::new(&mut buf[..size]) {
+                        // dump_dhcp_info(&dhcp_packet);
+                        dhcp_handler(&dhcp_packet, &client_socket);
+                    }
+                });
                 // srcにsend_toして正しく送信できるのか・・・？
                 // server_socket.send_to(&buf[..size], src).expect("Failed to send response");
             },
@@ -283,8 +311,6 @@ fn dump_dhcp_info(packet: &DhcpPacket) {
     // print_ip(packet.chaddr);
 }
 
-
-
 fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
     if packet.get_op() != BOOTREQUEST {
         return;
@@ -294,10 +320,14 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
         let message_type = message[0];
         let mut packet_buffer = [0u8; DHCP_SIZE];
         let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap();
+        let target_ip = "192.168.111.88".parse().unwrap();
         match message_type {
             DHCPDISCOVER => {
                 println!("dhcp discover");
-                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer) {
+                if is_ipaddr_already_in_use("en0".to_string(), "192.168.111.222".parse().unwrap(), target_ip) {
+                    panic!("ip already in use");
+                }
+                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, target_ip) {
                     // let payload = dhcp_packet.buffer;
                     // dump_payload(payload);
                     // let payload = bincode::serialize(&dhcp_packet).unwrap();
@@ -308,7 +338,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
 
             DHCPREQUEST => {
                 println!("dhcp request");
-                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPACK, &mut packet_buffer) {
+                if let Ok(dhcp_packet) = make_dhcp_packet(&packet, DHCPACK, &mut packet_buffer, target_ip) {
                     soc.send_to(dhcp_packet.buffer, dest).expect("failed to send");
                 }
             },
@@ -326,16 +356,16 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
     }
 }
 
-fn make_dhcp_packet<'a>(incoming_packet: &DhcpPacket, message_type: u8, buffer: &'a mut [u8]) -> Result<DhcpPacket<'a>, io::Error>{
+fn make_dhcp_packet<'a>(incoming_packet: &DhcpPacket, message_type: u8, buffer: &'a mut [u8], target_ip: Ipv4Addr) -> Result<DhcpPacket<'a>, io::Error>{
     let mut dhcp_packet = DhcpPacket::new(buffer).unwrap();
     dhcp_packet.set_op(BOOTREPLY);
     dhcp_packet.set_htype(HTYPE_ETHER);
     dhcp_packet.set_hlen(HLEN_MACADDR);
     dhcp_packet.set_xid(incoming_packet.get_xid());
-    if incoming_packet.get_giaddr() != net::Ipv4Addr::new(0, 0, 0, 0) {
+    if incoming_packet.get_giaddr() != Ipv4Addr::new(0, 0, 0, 0) {
         dhcp_packet.set_flags(incoming_packet.get_flags());
     }
-    dhcp_packet.set_yiaddr(&"192.168.11.88".parse().unwrap()); //TODO: IPプールを用意
+    dhcp_packet.set_yiaddr(&target_ip); //TODO: IPプールを用意
     dhcp_packet.set_chaddr(incoming_packet.get_chaddr());
 
     let mut cursor = OPTIONS;
