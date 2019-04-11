@@ -7,3 +7,5 @@ edition = "2018"
 [dependencies]
 pnet = "0.22.0"
 byteorder = "1"
+log = "0.4"
+failure = "0.1.5"
