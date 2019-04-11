@@ -15,6 +15,8 @@ use pnet::transport::{
 use pnet::util::checksum;
 use pnet::datalink::MacAddr;
 
+use failure;
+
 #[macro_use]
 extern crate log;
 
@@ -243,11 +245,11 @@ fn test_is_ip_use() {
 // IPアドレスが既に使用されているか調べる。
 fn is_ipaddr_already_in_use(
     icmp_packet: EchoRequestPacket,
-    target_ip: Ipv4Addr,
+    target_ip: &Ipv4Addr,
     ts: &mut TransportSender,
     tr: &mut TransportReceiver,
 ) -> Result<bool, failure::Error> {
-    if ts.send_to(icmp_packet, IpAddr::V4(target_ip)).is_err() {
+    if ts.send_to(icmp_packet, IpAddr::V4(*target_ip)).is_err() {
         return Err(failure::err_msg("Failed to send icmp echo."));
     }
     match icmp_packet_iter(tr).next() {
@@ -311,6 +313,37 @@ fn dump_dhcp_info(packet: &DhcpPacket) {
     // print_ip(packet.chaddr);
 }
 
+// 利用可能なIPアドレスを探す。
+// 以前リースされたものがあればそれを返し、なければアドレスプールから利用可能なIPアドレスを返却する。
+fn decide_lease_ip(
+    icmp_packet: EchoRequestPacket,
+    client_macaddr: MacAddr,
+    sender: &mut TransportSender,
+    receiver: &mut TransportReceiver,
+) -> Result<Ipv4Addr, failure::Error>{
+    //TODO: MACアドレスでDB問い合わせ
+    //TODO: アドレスプールからIP取得
+    let addr_pool: [Ipv4Addr; 4] = ["192.168.111.88".parse().unwrap(),
+                     "192.168.111.89".parse().unwrap(),
+                     "192.168.111.90".parse().unwrap(),
+                     "192.168.111.91".parse().unwrap()]; //ダミー
+    for target_ip in &addr_pool {
+        match is_ipaddr_already_in_use(icmp_packet.clone(), &target_ip, sender, receiver) {
+            Ok(used) => {
+                if used {
+                    continue;
+                } else {
+                    return Ok(target_ip.clone());
+                }
+            },
+            Err(msg) => {
+                warn!("{}", msg);
+            }
+        }
+    }
+    return Err(failure::err_msg("Could not decide available ip address."))
+}
+
 fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
     // dhcpのヘッダ読み取り
     if let Some(message) = packet.get_option(OPTION_MESSAGE_TYPE_CODE) {
@@ -321,16 +354,24 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
 
         let icmp_buf = create_default_icmp_buffer();
         let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
-        let (mut ts, mut tr) = transport::transport_channel(
+        let (mut sender, mut receiver) = transport::transport_channel(
             1024,
             TransportChannelType::Layer3(IpNextHeaderProtocols::Icmp),
-        ).unwrap();
+        )
+        .unwrap();
         match message_type {
             DHCPDISCOVER => {
                 println!("dhcp discover");
-                if is_ipaddr_already_in_use(icmp_packet, target_ip, &mut ts, &mut tr) {
-                    // TODO: 別アドレスで再試行
-                }
+                // DBアクセス。以前リースしたやつがあればそれを再び渡す
+                // IPアドレスの決定
+                let target_ip = match decide_lease_ip(icmp_packet, packet.get_chaddr(), &mut sender, &mut receiver) {
+                    Ok(ip) => ip,
+                    Err(msg) => {
+                        error!("{}", msg);
+                        return;
+                    }
+                };
+
                 if let Ok(dhcp_packet) =
                     make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, target_ip)
                 {
@@ -343,6 +384,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
 
             DHCPREQUEST => {
                 println!("dhcp request");
+                // TODO: DBに使用ずみをコミット
                 if let Ok(dhcp_packet) =
                     make_dhcp_packet(&packet, DHCPACK, &mut packet_buffer, target_ip)
                 {
@@ -382,8 +424,9 @@ fn make_dhcp_packet<'a>(
     if incoming_packet.get_giaddr() != Ipv4Addr::new(0, 0, 0, 0) {
         dhcp_packet.set_flags(incoming_packet.get_flags());
     }
-    dhcp_packet.set_yiaddr(&target_ip); //TODO: IPプールを用意
-    dhcp_packet.set_chaddr(incoming_packet.get_chaddr());
+    dhcp_packet.set_yiaddr(&target_ip);
+    let client_macaddr = incoming_packet.get_chaddr();
+    dhcp_packet.set_chaddr(&client_macaddr);
 
     let mut cursor = OPTIONS;
     dhcp_packet.set_magic_cookie(&mut cursor);
