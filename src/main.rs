@@ -6,13 +6,14 @@ use std::{io, net, ptr, str};
 
 use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
 use pnet::packet::icmp::IcmpTypes;
-use pnet::packet::Packet;
 use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::packet::{ Packet, PrimitiveValues };
 use pnet::transport::{
     self, icmp_packet_iter, TransportChannelType, TransportProtocol::Ipv4, TransportReceiver,
     TransportSender,
 };
 use pnet::util::checksum;
+use pnet::datalink::MacAddr;
 
 #[macro_use]
 extern crate log;
@@ -99,8 +100,9 @@ impl<'a> DhcpPacket<'a> {
         Ipv4Addr::new(b[0], b[1], b[2], b[3])
     }
 
-    fn get_chaddr(&self) -> &[u8] {
-        &self.buffer[CHADDR..SNAME]
+    fn get_chaddr(&self) -> MacAddr {
+        let b = &self.buffer[CHADDR..SNAME];
+        MacAddr::new(b[0], b[1], b[2], b[3], b[4], b[5])
     }
 
     fn set_op(&mut self, op: u8) {
@@ -145,10 +147,12 @@ impl<'a> DhcpPacket<'a> {
         }
     }
 
-    fn set_chaddr(&mut self, chaddr: &[u8]) {
+    fn set_chaddr(&mut self, chaddr: &MacAddr) {
+        let t = chaddr.to_primitive_values();
+        let macaddr_value = [t.0, t.1, t.2, t.3, t.4, t.5];
         unsafe {
             ptr::copy_nonoverlapping(
-                chaddr.as_ptr(),
+                macaddr_value.as_ptr(),
                 self.buffer[CHADDR..SNAME].as_mut_ptr(),
                 SNAME - CHADDR,
             );
