@@ -242,14 +242,16 @@ fn is_ipaddr_already_in_use(
     target_ip: Ipv4Addr,
     ts: &mut TransportSender,
     tr: &mut TransportReceiver,
-) -> Result<bool, io::Error<>> {
-    ts.send_to(icmp_packet, IpAddr::V4(target_ip));
+) -> Result<bool, failure::Error> {
+    if ts.send_to(icmp_packet, IpAddr::V4(target_ip)).is_err() {
+        return Err(failure::err_msg("Failed to send icmp echo."));
+    }
     match icmp_packet_iter(tr).next() {
         Ok((packet, _)) => match packet.get_icmp_type() {
-            IcmpTypes::EchoReply => return true,
-            _ => return false,
+            IcmpTypes::EchoReply => return Ok(true),
+            _ => return Ok(false),
         },
-        _ => return true,
+        _ => return Err(failure::err_msg("Failed to receive icmp echo reply.")),
     }
 }
 
