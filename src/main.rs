@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use std::{io, net, ptr, str};
+use std::{io, net, ptr, str, env};
 
 use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
 use pnet::packet::icmp::IcmpTypes;
@@ -19,6 +19,9 @@ use failure;
 
 #[macro_use]
 extern crate log;
+
+use env_logger;
+use log::{ error, warn, info, debug };
 
 /*
 TODO
@@ -249,14 +252,12 @@ fn is_ipaddr_already_in_use(
     ts: &mut TransportSender,
     tr: &mut TransportReceiver,
 ) -> Result<bool, failure::Error> {
-    let target_ip = IpAddr::V4(target_ip);
-    match ts.send_to(icmp_packet, target_ip) {
-        Ok(_size) => {}
-        Err(_) => {}
+    if ts.send_to(icmp_packet, IpAddr::V4(target_ip)).is_err() {
+        println!("failed icmp");
+        return Err(failure::err_msg("Failed to send icmp echo."));
     }
-    // if ts.send_to(icmp_packet, target_ip).is_err() {
-    //     return Err(failure::err_msg("Failed to send icmp echo."));
-    // }
+    println!("sent icmp");
+
     match icmp_packet_iter(tr).next() {
         Ok((packet, _)) => match packet.get_icmp_type() {
             IcmpTypes::EchoReply => return Ok(true),
@@ -276,6 +277,9 @@ fn create_default_icmp_buffer() -> [u8; 8] {
 }
 
 fn main() {
+    env::set_var("RUST_LOG", "debug");
+    env_logger::init();
+
     let server_socket = net::UdpSocket::bind("0.0.0.0:67").expect("Failed to bind socket");
     server_socket.set_broadcast(true).unwrap();
     loop {
@@ -337,7 +341,7 @@ fn select_lease_ip(
                 }
             },
             Err(msg) => {
-                warn!("{}", msg);
+                println!("{}", msg);
             }
         }
     }
@@ -353,7 +357,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
         let target_ip = "192.168.111.88".parse().unwrap(); //TODO: アドレスプールから選ぶ
         let (mut sender, mut receiver) = transport::transport_channel(
             1024,
-            TransportChannelType::Layer3(IpNextHeaderProtocols::Icmp),
+            TransportChannelType::Layer4(Ipv4(IpNextHeaderProtocols::Icmp)),
         )
         .unwrap();
 
@@ -369,7 +373,6 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
                         return;
                     }
                 };
-
                 if let Ok(dhcp_packet) =
                     make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, ip_to_be_leased)
                 {

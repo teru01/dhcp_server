@@ -8,4 +8,6 @@ edition = "2018"
 pnet = "0.22.0"
 byteorder = "1"
 log = "0.4"
+env_logger = "0.6.1"
 failure = "0.1.5"
+
