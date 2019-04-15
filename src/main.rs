@@ -74,7 +74,7 @@ struct DhcpPacket<'a> {
 
 impl<'a> DhcpPacket<'a> {
     fn new(buf: &mut [u8]) -> Option<DhcpPacket> {
-        if buf.len() < DHCP_MINIMUM_SIZE {
+        if buf.len() > DHCP_MINIMUM_SIZE {
             let packet = DhcpPacket { buffer: buf };
             return Some(packet);
         }
@@ -245,13 +245,18 @@ fn test_is_ip_use() {
 // IPアドレスが既に使用されているか調べる。
 fn is_ipaddr_already_in_use(
     icmp_packet: EchoRequestPacket,
-    target_ip: &Ipv4Addr,
+    target_ip: Ipv4Addr,
     ts: &mut TransportSender,
     tr: &mut TransportReceiver,
 ) -> Result<bool, failure::Error> {
-    if ts.send_to(icmp_packet, IpAddr::V4(*target_ip)).is_err() {
-        return Err(failure::err_msg("Failed to send icmp echo."));
+    let target_ip = IpAddr::V4(target_ip);
+    match ts.send_to(icmp_packet, target_ip) {
+        Ok(_size) => {}
+        Err(_) => {}
     }
+    // if ts.send_to(icmp_packet, target_ip).is_err() {
+    //     return Err(failure::err_msg("Failed to send icmp echo."));
+    // }
     match icmp_packet_iter(tr).next() {
         Ok((packet, _)) => match packet.get_icmp_type() {
             IcmpTypes::EchoReply => return Ok(true),
@@ -298,21 +303,6 @@ fn main() {
     }
 }
 
-fn dump_dhcp_info(packet: &DhcpPacket) {
-    // println!("op: {}", packet.op);
-    // println!("htype: {}", packet.htype);
-    // println!("hlen: {}", packet.hlen);
-    // println!("hops: {}", packet.hops);
-    // println!("xid: {}", packet.xid);
-    // println!("secs: {}", packet.secs);
-    // println!("flags: {}", packet.flags);
-    // print_ip(packet.ciaddr);
-    // print_ip(packet.yiaddr);
-    // print_ip(packet.siaddr);
-    // print_ip(packet.giaddr);
-    // print_ip(packet.chaddr);
-}
-
 // こうすると、icmpパケットの中身までも1つのパケットで生成できるが、EchoRequestがずっと行き続けるのでよくない
 // fn create_echo_request_packet() -> EchoRequestPacket<'static> {
 //     let buffer = vec![0u8; 8];
@@ -338,7 +328,7 @@ fn select_lease_ip(
     for target_ip in &addr_pool {
         let icmp_buf = create_default_icmp_buffer();
         let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
-        match is_ipaddr_already_in_use(icmp_packet, &target_ip, sender, receiver) {
+        match is_ipaddr_already_in_use(icmp_packet, target_ip.clone(), sender, receiver) {
             Ok(used) => {
                 if used {
                     continue;
@@ -361,18 +351,18 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
         let mut packet_buffer = [0u8; DHCP_SIZE];
         let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap(); //TODO: ブロードキャストをユニキャストに
         let target_ip = "192.168.111.88".parse().unwrap(); //TODO: アドレスプールから選ぶ
-
         let (mut sender, mut receiver) = transport::transport_channel(
             1024,
             TransportChannelType::Layer3(IpNextHeaderProtocols::Icmp),
         )
         .unwrap();
+
         match message_type {
             DHCPDISCOVER => {
                 println!("dhcp discover");
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
-                let target_ip = match select_lease_ip(&mut sender, &mut receiver) {
+                let ip_to_be_leased = match select_lease_ip(&mut sender, &mut receiver) {
                     Ok(ip) => ip,
                     Err(msg) => {
                         error!("{}", msg);
@@ -381,7 +371,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
                 };
 
                 if let Ok(dhcp_packet) =
-                    make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, target_ip)
+                    make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, ip_to_be_leased)
                 {
                     soc.send_to(dhcp_packet.buffer, dest)
                         .expect("failed to send");
