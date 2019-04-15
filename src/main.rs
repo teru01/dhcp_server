@@ -313,11 +313,19 @@ fn dump_dhcp_info(packet: &DhcpPacket) {
     // print_ip(packet.chaddr);
 }
 
+// こうすると、icmpパケットの中身までも1つのパケットで生成できるが、EchoRequestがずっと行き続けるのでよくない
+// fn create_echo_request_packet() -> EchoRequestPacket<'static> {
+//     let buffer = vec![0u8; 8];
+//     let mut icmp_packet = MutableEchoRequestPacket::owned(buffer).unwrap();
+//     icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
+//     let checksum = checksum(icmp_packet.to_immutable().packet(), 16);
+//     icmp_packet.set_checksum(checksum);
+//     return icmp_packet.consume_to_immutable();
+// }
+
 // 利用可能なIPアドレスを探す。
 // 以前リースされたものがあればそれを返し、なければアドレスプールから利用可能なIPアドレスを返却する。
-fn decide_lease_ip(
-    icmp_packet: EchoRequestPacket,
-    client_macaddr: MacAddr,
+fn select_lease_ip(
     sender: &mut TransportSender,
     receiver: &mut TransportReceiver,
 ) -> Result<Ipv4Addr, failure::Error>{
@@ -328,7 +336,9 @@ fn decide_lease_ip(
                      "192.168.111.90".parse().unwrap(),
                      "192.168.111.91".parse().unwrap()]; //ダミー
     for target_ip in &addr_pool {
-        match is_ipaddr_already_in_use(icmp_packet.clone(), &target_ip, sender, receiver) {
+        let icmp_buf = create_default_icmp_buffer();
+        let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
+        match is_ipaddr_already_in_use(icmp_packet, &target_ip, sender, receiver) {
             Ok(used) => {
                 if used {
                     continue;
@@ -352,8 +362,6 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
         let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap(); //TODO: ブロードキャストをユニキャストに
         let target_ip = "192.168.111.88".parse().unwrap(); //TODO: アドレスプールから選ぶ
 
-        let icmp_buf = create_default_icmp_buffer();
-        let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
         let (mut sender, mut receiver) = transport::transport_channel(
             1024,
             TransportChannelType::Layer3(IpNextHeaderProtocols::Icmp),
@@ -364,7 +372,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
                 println!("dhcp discover");
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
-                let target_ip = match decide_lease_ip(icmp_packet, packet.get_chaddr(), &mut sender, &mut receiver) {
+                let target_ip = match select_lease_ip(&mut sender, &mut receiver) {
                     Ok(ip) => ip,
                     Err(msg) => {
                         error!("{}", msg);
