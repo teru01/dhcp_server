@@ -2,18 +2,18 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use std::{io, net, ptr, str, env};
+use std::{env, io, net, ptr, str};
 
+use pnet::datalink::MacAddr;
 use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
 use pnet::packet::icmp::IcmpTypes;
 use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::{ Packet, PrimitiveValues };
+use pnet::packet::{Packet, PrimitiveValues};
 use pnet::transport::{
     self, icmp_packet_iter, TransportChannelType, TransportProtocol::Ipv4, TransportReceiver,
     TransportSender,
 };
 use pnet::util::checksum;
-use pnet::datalink::MacAddr;
 
 use failure;
 
@@ -21,7 +21,7 @@ use failure;
 extern crate log;
 
 use env_logger;
-use log::{ error, warn, info, debug };
+use log::{debug, error, info, warn};
 
 /*
 TODO
@@ -252,11 +252,15 @@ fn is_ipaddr_already_in_use(
     ts: &mut TransportSender,
     tr: &mut TransportReceiver,
 ) -> Result<bool, failure::Error> {
-    if ts.send_to(icmp_packet, IpAddr::V4(target_ip)).is_err() {
-        println!("failed icmp");
-        return Err(failure::err_msg("Failed to send icmp echo."));
+    match ts.send_to(icmp_packet, IpAddr::V4(target_ip)) {
+        Ok((_)) => {
+            debug!("OK");
+        }
+        Err(e) => {
+            warn!("{:?}", e);
+            return Err(failure::err_msg("Failed to send icmp echo."));
+        }
     }
-    println!("sent icmp");
 
     match icmp_packet_iter(tr).next() {
         Ok((packet, _)) => match packet.get_icmp_type() {
@@ -322,13 +326,15 @@ fn main() {
 fn select_lease_ip(
     sender: &mut TransportSender,
     receiver: &mut TransportReceiver,
-) -> Result<Ipv4Addr, failure::Error>{
+) -> Result<Ipv4Addr, failure::Error> {
     //TODO: MACアドレスでDB問い合わせ
     //TODO: アドレスプールからIP取得
-    let addr_pool: [Ipv4Addr; 4] = ["192.168.111.88".parse().unwrap(),
-                     "192.168.111.89".parse().unwrap(),
-                     "192.168.111.90".parse().unwrap(),
-                     "192.168.111.91".parse().unwrap()]; //ダミー
+    let addr_pool: [Ipv4Addr; 4] = [
+        "192.168.111.1".parse().unwrap(),
+        "192.168.111.89".parse().unwrap(),
+        "192.168.111.90".parse().unwrap(),
+        "192.168.111.91".parse().unwrap(),
+    ]; //ダミー
     for target_ip in &addr_pool {
         let icmp_buf = create_default_icmp_buffer();
         let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
@@ -339,13 +345,13 @@ fn select_lease_ip(
                 } else {
                     return Ok(target_ip.clone());
                 }
-            },
+            }
             Err(msg) => {
-                println!("{}", msg);
+                warn!("{}", msg);
             }
         }
     }
-    return Err(failure::err_msg("Could not decide available ip address."))
+    return Err(failure::err_msg("Could not decide available ip address."));
 }
 
 fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
