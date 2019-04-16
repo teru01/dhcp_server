@@ -4,7 +4,6 @@ use std::thread;
 use std::time::Duration;
 use std::{env, io, net, ptr, str};
 
-use pnet::datalink::MacAddr;
 use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
 use pnet::packet::icmp::IcmpTypes;
 use pnet::packet::ip::IpNextHeaderProtocols;
@@ -55,183 +54,8 @@ const DHCPRELEASE: u8 = 7;
 const BOOTREQUEST: u8 = 1;
 const BOOTREPLY: u8 = 2;
 
-const OP: usize = 0;
-const HTYPE: usize = 1;
-const HLEN: usize = 2;
-const HOPS: usize = 3;
-const XID: usize = 4;
-const SECS: usize = 8;
-const FLAGS: usize = 10;
-const CIADDR: usize = 12;
-const YIADDR: usize = 16;
-const SIADDR: usize = 20;
-const GIADDR: usize = 24;
-const CHADDR: usize = 28;
-const SNAME: usize = 44;
-const FILE: usize = 108;
-const OPTIONS: usize = 236;
-
-struct DhcpPacket<'a> {
-    buffer: &'a mut [u8],
-}
-
-impl<'a> DhcpPacket<'a> {
-    fn new(buf: &mut [u8]) -> Option<DhcpPacket> {
-        if buf.len() > DHCP_MINIMUM_SIZE {
-            let packet = DhcpPacket { buffer: buf };
-            return Some(packet);
-        }
-        None
-    }
-
-    fn get_op(&self) -> u8 {
-        self.buffer[OP]
-    }
-
-    fn get_options(&self) -> &[u8] {
-        &self.buffer[OPTIONS..]
-    }
-
-    fn get_xid(&self) -> &[u8] {
-        &self.buffer[XID..SECS]
-    }
-
-    fn get_flags(&self) -> &[u8] {
-        &self.buffer[FLAGS..CIADDR]
-    }
-
-    fn get_giaddr(&self) -> Ipv4Addr {
-        let b = &self.buffer[GIADDR..CHADDR];
-        Ipv4Addr::new(b[0], b[1], b[2], b[3])
-    }
-
-    fn get_chaddr(&self) -> MacAddr {
-        let b = &self.buffer[CHADDR..SNAME];
-        MacAddr::new(b[0], b[1], b[2], b[3], b[4], b[5])
-    }
-
-    fn set_op(&mut self, op: u8) {
-        self.buffer[OP] = op;
-    }
-
-    fn set_htype(&mut self, htype: u8) {
-        self.buffer[HTYPE] = htype;
-    }
-
-    fn set_hlen(&mut self, hlen: u8) {
-        self.buffer[HLEN] = hlen;
-    }
-
-    fn set_xid(&mut self, xid: &[u8]) {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                xid.as_ptr(),
-                self.buffer[XID..SECS].as_mut_ptr(),
-                SECS - XID,
-            );
-        }
-    }
-
-    fn set_flags(&mut self, flags: &[u8]) {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                flags.as_ptr(),
-                self.buffer[FLAGS..CIADDR].as_mut_ptr(),
-                CIADDR - FLAGS,
-            );
-        }
-    }
-
-    fn set_yiaddr(&mut self, yiaddr: &Ipv4Addr) {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                yiaddr.octets().as_ptr(),
-                self.buffer[YIADDR..SIADDR].as_mut_ptr(),
-                SIADDR - YIADDR,
-            );
-        }
-    }
-
-    fn set_chaddr(&mut self, chaddr: &MacAddr) {
-        let t = chaddr.to_primitive_values();
-        let macaddr_value = [t.0, t.1, t.2, t.3, t.4, t.5];
-        unsafe {
-            ptr::copy_nonoverlapping(
-                macaddr_value.as_ptr(),
-                self.buffer[CHADDR..SNAME].as_mut_ptr(),
-                SNAME - CHADDR,
-            );
-        }
-    }
-
-    fn set_option(
-        &mut self,
-        cursor: &mut usize,
-        message_type: u8,
-        len: usize,
-        contents: Option<&[u8]>,
-    ) {
-        self.buffer[*cursor] = message_type;
-        if message_type == OPTION_END {
-            return;
-        }
-        self.buffer[*cursor + 1] = len as u8;
-
-        if let Some(contents) = contents {
-            unsafe {
-                ptr::copy_nonoverlapping(
-                    contents.as_ptr(),
-                    self.buffer[*cursor + 2..].as_mut_ptr(),
-                    len,
-                );
-            }
-        }
-        *cursor += 2 + len; //message_type + len + buffer;
-    }
-
-    fn set_magic_cookie(&mut self, cursor: &mut usize) {
-        unsafe {
-            ptr::copy_nonoverlapping(
-                [0x63, 0x82, 0x53, 0x63].as_ptr(),
-                self.buffer[*cursor..].as_mut_ptr(),
-                4,
-            );
-        }
-        *cursor += 4;
-    }
-
-    // fn get_htype(&self) -> u8 {
-    //     self.buffer[1]
-    // }
-
-    // fn get_hlen(&self) -> u8 {
-    //     self.buffer[2]
-    // }
-
-    // fn get_hops(&self) -> u8 {
-    //     self.buffer[3]
-    // }
-
-    //optionはcode, length, bufferの順に並んでいる
-    fn get_option(&self, option_code: u8) -> Option<Vec<u8>> {
-        let mut index: usize = 4; // 最初の4バイトはクッキー
-        let options = self.get_options();
-        while index < OPTION_END as usize {
-            if options[index] == option_code {
-                let len = options[index + 1];
-                let buf_index = index + 2;
-                let v = options[buf_index..buf_index + len as usize].to_vec();
-                return Some(v);
-            } else if options[index] == 0 {
-                index += 1;
-            } else {
-                let len = options[index + 1];
-                index += 1 + len as usize;
-            }
-        }
-        None
-    }
-}
+mod dhcp;
+use dhcp::DhcpPacket;
 
 #[test]
 fn test_is_ip_use() {
@@ -253,7 +77,7 @@ fn is_ipaddr_already_in_use(
     tr: &mut TransportReceiver,
 ) -> Result<bool, failure::Error> {
     match ts.send_to(icmp_packet, IpAddr::V4(target_ip)) {
-        Ok((_)) => {
+        Ok(_) => {
             debug!("OK");
         }
         Err(e) => {
@@ -262,12 +86,34 @@ fn is_ipaddr_already_in_use(
         }
     }
 
-    match icmp_packet_iter(tr).next() {
-        Ok((packet, _)) => match packet.get_icmp_type() {
-            IcmpTypes::EchoReply => return Ok(true),
-            _ => return Ok(false),
-        },
-        _ => return Err(failure::err_msg("Failed to receive icmp echo reply.")),
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        match icmp_packet_iter(tr).next() {
+            Ok((packet, _)) => {
+                match packet.get_icmp_type() {
+                    IcmpTypes::EchoReply => {
+                        if sender.send(true).is_err() {
+                            // タイムアウトしているとき
+                            return;
+                        };
+                    },
+                    _ => {
+                        if sender.send(false).is_err() {
+                            return;
+                        }
+                    }
+                }
+            },
+            _ => error!("Failed to receive icmp echo reply.")
+        }
+    });
+
+    if let Ok(is_used) = receiver.recv_timeout(Duration::from_secs(1)) {
+        return Ok(is_used);
+    } else {
+        // タイムアウトした時。アドレスは使われていない
+        debug!("not received reply within timeout");
+        return Ok(false);
     }
 }
 
@@ -382,7 +228,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
                 if let Ok(dhcp_packet) =
                     make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, ip_to_be_leased)
                 {
-                    soc.send_to(dhcp_packet.buffer, dest)
+                    soc.send_to(dhcp_packet.get_buffer(), dest)
                         .expect("failed to send");
                     println!("send dhcp offer");
                 }
@@ -395,7 +241,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
                 if let Ok(dhcp_packet) =
                     make_dhcp_packet(&packet, DHCPACK, &mut packet_buffer, target_ip)
                 {
-                    soc.send_to(dhcp_packet.buffer, dest)
+                    soc.send_to(dhcp_packet.get_buffer(), dest)
                         .expect("failed to send");
                 }
                 return;
@@ -435,7 +281,7 @@ fn make_dhcp_packet<'a>(
     let client_macaddr = incoming_packet.get_chaddr();
     dhcp_packet.set_chaddr(&client_macaddr);
 
-    let mut cursor = OPTIONS;
+    let mut cursor = dhcp::OPTIONS;
     dhcp_packet.set_magic_cookie(&mut cursor);
     dhcp_packet.set_option(
         &mut cursor,
