@@ -247,6 +247,10 @@ fn dhcp_handler(
 
         match message_type {
             DHCPDISCOVER => {
+                // DISCOVERを受け取った時。
+                // OFFERを返却する。
+                // この際、クライアントのrequested ip address、chaddrで照合した以前リースしたIP、アドレスプールから選んだ値の優先順にIPを選んで返す
+                // chaddrと返したIPのマップ、トランザクションIDを記録しておく
                 debug!("dhcp discover");
 
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
@@ -278,10 +282,16 @@ fn dhcp_handler(
                 return;
             }
 
-            // クライアントからのリクエストを受け取る。
-            // OFFERに返答する（server_identifierがある=> 自分と異なるなら破棄）
-            // or リース延長　ciaddrでレコード検索して、一致するものがあれば返す。なければNACK
             DHCPREQUEST => {
+                // クライアントからのリクエストを受け取る。
+                // トランザクションIDがあるか確認
+
+                // OFFERに対する返答（server_identifierがあるとき）自分と異なるなら破棄、別のDHCPが選ばれたから
+                    // リース期間などで変更されてるかもしれないので確認
+                    // 問題なければACKを返して、DBにマップをコミット
+                    // 問題あればNAKを返して、マップからエントリーを削除
+                // リース延長、更新（server_idがない時)
+                    //ciaddrでレコード検索して、一致するものがあれば返す。なければNACK
                 debug!("dhcp request");
                 // TODO: DBに使用ずみをコミット
                 let ip_to_be_leased = {
@@ -301,14 +311,15 @@ fn dhcp_handler(
             }
 
             DHCPRELEASE => {
-                // IPを利用可能としてアドレスプールに戻る。
+                // IPを利用可能としてアドレスプールに戻す
+                // マップからエントリの削除。アドレスプールへの追加
                 debug!("dhcp release");
                 return;
             }
 
             DHCPDECLINE => {
                 // クライアントがARPした際に衝突していたらこれが届く。
-                // 利用不可能なIPとしてマークする。
+                // 利用不可能なIPとしてマークする。=> アドレスプールからの削除
                 debug!("dhcp decline");
                 return;
             }
