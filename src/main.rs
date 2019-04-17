@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::mpsc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
-use std::{env, io, net, ptr, str};
+use std::{env, io, net, ptr};
 
 use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
 use pnet::packet::icmp::IcmpTypes;
@@ -15,6 +17,8 @@ use pnet::transport::{
 use pnet::util::checksum;
 
 use failure;
+
+use byteorder::{BigEndian, ByteOrder};
 
 #[macro_use]
 extern crate log;
@@ -33,15 +37,12 @@ DHCPパケットを作成してフィールドを埋める
 const HTYPE_ETHER: u8 = 1;
 const HLEN_MACADDR: u8 = 6;
 
-const DHCP_MINIMUM_SIZE: usize = 237;
 const OPTION_MESSAGE_TYPE_CODE: u8 = 53;
 
 const DHCP_SIZE: usize = 400;
 const OPTION_IP_ADDRESS_LEASE_TIME: u8 = 51;
 const OPTION_SERVER_IDENTIFIER: u8 = 54;
 const OPTION_END: u8 = 255;
-
-const WIDTH: usize = 20;
 
 const DHCPDISCOVER: u8 = 1;
 const DHCPOFFER: u8 = 2;
@@ -61,16 +62,22 @@ use dhcp::DhcpPacket;
 fn test_is_ipaddr_already_in_use() {
     assert_eq!(
         true,
-        is_ipaddr_already_in_use(
-            "192.168.111.1".parse().unwrap()
-        ).unwrap()
+        is_ipaddr_already_in_use("192.168.111.1".parse().unwrap()).unwrap()
     );
 }
 
+fn create_default_icmp_buffer() -> [u8; 8] {
+    let mut buffer = [0u8; 8];
+    let mut icmp_packet = MutableEchoRequestPacket::new(&mut buffer).unwrap();
+    icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
+    let checksum = checksum(icmp_packet.to_immutable().packet(), 16);
+    icmp_packet.set_checksum(checksum);
+    return buffer;
+}
+
 // IPアドレスが既に使用されているか調べる。
-fn is_ipaddr_already_in_use(
-    target_ip: Ipv4Addr,
-) -> Result<bool, failure::Error> {
+// TODO: tr, tsはArcを使えば生成は1回だけで良い？
+fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Error> {
     let icmp_buf = create_default_icmp_buffer();
     let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
 
@@ -118,33 +125,30 @@ fn is_ipaddr_already_in_use(
     }
 }
 
-fn create_default_icmp_buffer() -> [u8; 8] {
-    let mut buffer = [0u8; 8];
-    let mut icmp_packet = MutableEchoRequestPacket::new(&mut buffer).unwrap();
-    icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
-    let checksum = checksum(icmp_packet.to_immutable().packet(), 16);
-    icmp_packet.set_checksum(checksum);
-    return buffer;
-}
-
 fn main() {
     env::set_var("RUST_LOG", "debug");
     env_logger::init();
 
     let server_socket = net::UdpSocket::bind("0.0.0.0:67").expect("Failed to bind socket");
     server_socket.set_broadcast(true).unwrap();
+
+    // トランザクションIDと利用可能なIPの紐付け
+    let mut used_ipaddr_table: Arc<RwLock<HashMap<u32, Ipv4Addr>>> =
+        Arc::new(RwLock::new(HashMap::new()));
     loop {
         let mut recv_buf = [0u8; 1024];
-        let client_socket = server_socket
-            .try_clone()
-            .expect("Failed to create client socket");
         match server_socket.recv_from(&mut recv_buf) {
             Ok((size, src)) => {
-                println!("incoming data from {}/size: {}", src, size);
+                info!("Incoming data from {}, size: {}", src, size);
+                let client_socket = server_socket
+                    .try_clone()
+                    .expect("Failed to create client socket");
+                let table = used_ipaddr_table.clone();
+
                 thread::spawn(move || {
                     if let Some(dhcp_packet) = DhcpPacket::new(&mut recv_buf[..size]) {
                         if dhcp_packet.get_op() == BOOTREQUEST {
-                            dhcp_handler(&dhcp_packet, &client_socket);
+                            dhcp_handler(&dhcp_packet, &client_socket, table);
                         }
                     }
                 });
@@ -158,7 +162,7 @@ fn main() {
     }
 }
 
-// こうすると、icmpパケットの中身までも1つのパケットで生成できるが、EchoRequestがずっと行き続けるのでよくない
+// こうすると、icmpパケットの中身までも1つのパケットで生成できるが、EchoRequestがずっと生き続けるのでよくない
 // fn create_echo_request_packet() -> EchoRequestPacket<'static> {
 //     let buffer = vec![0u8; 8];
 //     let mut icmp_packet = MutableEchoRequestPacket::owned(buffer).unwrap();
@@ -198,7 +202,11 @@ fn select_lease_ip() -> Result<Ipv4Addr, failure::Error> {
     return Err(failure::err_msg("Could not decide available ip address."));
 }
 
-fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
+fn dhcp_handler(
+    packet: &DhcpPacket,
+    soc: &net::UdpSocket,
+    used_ipaddr_table: Arc<RwLock<HashMap<u32, Ipv4Addr>>>,
+) {
     // dhcpのヘッダ読み取り
     if let Some(message) = packet.get_option(OPTION_MESSAGE_TYPE_CODE) {
         let message_type = message[0];
@@ -209,6 +217,8 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
         match message_type {
             DHCPDISCOVER => {
                 println!("dhcp discover");
+
+                
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
                 let ip_to_be_leased = match select_lease_ip() {
@@ -218,6 +228,14 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
                         return;
                     }
                 };
+
+                {
+                    // 利用中IPアドレスのテーブルにinsertする。insertしたら即ロックを解放する。
+                    let transaction_id = BigEndian::read_u32(packet.get_xid());
+                    let mut table_lock = used_ipaddr_table.write().unwrap();
+                    table_lock.insert(transaction_id, ip_to_be_leased);
+                }
+
                 if let Ok(dhcp_packet) =
                     make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, ip_to_be_leased)
                 {
