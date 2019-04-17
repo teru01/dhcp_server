@@ -58,37 +58,38 @@ mod dhcp;
 use dhcp::DhcpPacket;
 
 #[test]
-fn test_is_ip_use() {
-    // assert_eq!(
-    //     true,
-    //     is_ipaddr_already_in_use(
-    //         "en0".to_string(),
-    //         "192.168.11.22".parse().unwrap(),
-    //         "192.168.11.1".parse().unwrap()
-    //     )
-    // );
+fn test_is_ipaddr_already_in_use() {
+    assert_eq!(
+        true,
+        is_ipaddr_already_in_use(
+            "192.168.111.1".parse().unwrap()
+        ).unwrap()
+    );
 }
 
 // IPアドレスが既に使用されているか調べる。
 fn is_ipaddr_already_in_use(
-    icmp_packet: EchoRequestPacket,
     target_ip: Ipv4Addr,
-    ts: &mut TransportSender,
-    tr: &mut TransportReceiver,
 ) -> Result<bool, failure::Error> {
-    match ts.send_to(icmp_packet, IpAddr::V4(target_ip)) {
-        Ok(_) => {
-            debug!("OK");
-        }
-        Err(e) => {
-            warn!("{:?}", e);
-            return Err(failure::err_msg("Failed to send icmp echo."));
-        }
+    let icmp_buf = create_default_icmp_buffer();
+    let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
+
+    let (mut transport_sender, mut transport_receiver) = transport::transport_channel(
+        1024,
+        TransportChannelType::Layer4(Ipv4(IpNextHeaderProtocols::Icmp)),
+    )
+    .unwrap();
+    if transport_sender
+        .send_to(icmp_packet, IpAddr::V4(target_ip))
+        .is_err()
+    {
+        return Err(failure::err_msg("Failed to send icmp echo."));
     }
 
     let (sender, receiver) = mpsc::channel();
+
     thread::spawn(move || {
-        match icmp_packet_iter(tr).next() {
+        match icmp_packet_iter(&mut transport_receiver).next() {
             Ok((packet, _)) => {
                 match packet.get_icmp_type() {
                     IcmpTypes::EchoReply => {
@@ -96,19 +97,19 @@ fn is_ipaddr_already_in_use(
                             // タイムアウトしているとき
                             return;
                         };
-                    },
+                    }
                     _ => {
                         if sender.send(false).is_err() {
                             return;
                         }
                     }
                 }
-            },
-            _ => error!("Failed to receive icmp echo reply.")
+            }
+            _ => error!("Failed to receive icmp echo reply."),
         }
     });
 
-    if let Ok(is_used) = receiver.recv_timeout(Duration::from_secs(1)) {
+    if let Ok(is_used) = receiver.recv_timeout(Duration::from_millis(30)) {
         return Ok(is_used);
     } else {
         // タイムアウトした時。アドレスは使われていない
@@ -169,10 +170,7 @@ fn main() {
 
 // 利用可能なIPアドレスを探す。
 // 以前リースされたものがあればそれを返し、なければアドレスプールから利用可能なIPアドレスを返却する。
-fn select_lease_ip(
-    sender: &mut TransportSender,
-    receiver: &mut TransportReceiver,
-) -> Result<Ipv4Addr, failure::Error> {
+fn select_lease_ip() -> Result<Ipv4Addr, failure::Error> {
     //TODO: MACアドレスでDB問い合わせ
     //TODO: アドレスプールからIP取得
     let addr_pool: [Ipv4Addr; 4] = [
@@ -182,13 +180,13 @@ fn select_lease_ip(
         "192.168.111.91".parse().unwrap(),
     ]; //ダミー
     for target_ip in &addr_pool {
-        let icmp_buf = create_default_icmp_buffer();
-        let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
-        match is_ipaddr_already_in_use(icmp_packet, target_ip.clone(), sender, receiver) {
+        match is_ipaddr_already_in_use(target_ip.clone()) {
             Ok(used) => {
                 if used {
+                    // IPアドレスが利用されているなら別アドレスで再試行
                     continue;
                 } else {
+                    // 利用されていないならそれを返す
                     return Ok(target_ip.clone());
                 }
             }
@@ -207,18 +205,13 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket) {
         let mut packet_buffer = [0u8; DHCP_SIZE];
         let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap(); //TODO: ブロードキャストをユニキャストに
         let target_ip = "192.168.111.88".parse().unwrap(); //TODO: アドレスプールから選ぶ
-        let (mut sender, mut receiver) = transport::transport_channel(
-            1024,
-            TransportChannelType::Layer4(Ipv4(IpNextHeaderProtocols::Icmp)),
-        )
-        .unwrap();
 
         match message_type {
             DHCPDISCOVER => {
                 println!("dhcp discover");
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
-                let ip_to_be_leased = match select_lease_ip(&mut sender, &mut receiver) {
+                let ip_to_be_leased = match select_lease_ip() {
                     Ok(ip) => ip,
                     Err(msg) => {
                         error!("{}", msg);
