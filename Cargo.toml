@@ -10,4 +10,4 @@ byteorder = "1"
 log = "0.4"
 env_logger = "0.6.1"
 failure = "0.1.5"
-
+rusqlite = "0.17.0"

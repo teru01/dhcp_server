@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
-use std::{env, io, net, ptr};
+use std::{env, io, net, ptr, fs};
 
 use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
 use pnet::packet::icmp::IcmpTypes;
@@ -126,14 +126,36 @@ fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Error>
     }
 }
 
-type Entry = HashMap<MacAddr, Ipv4Addr>;
+type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 
-struct AddressLeaseInfo {
-    used_ipaddr_table: RwLock<Entry>, //MACアドレスとリースIPのマップ
+struct DhcpServer {
+    used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
+    address_pool: RwLock<Ipv4Addr>,
     transaction_list: RwLock<Vec<u32>> //トランザクションIDのベクタ
 }
 
-impl AddressLeaseInfo {
+impl DhcpServer {
+    fn new() {
+        // envから設定情報の読み込み
+        // アドレスプールの設定、使用中マップの
+        let env = Self::load_env();
+
+    }
+
+    // 環境情報を読んでハッシュマップを返す
+    fn load_env() -> HashMap<String, String>{
+        let contents = fs::read_to_string(".env").expect("Failed to read env file");
+        let lines: Vec<_> = contents.split('\n').collect();
+        let mut map = HashMap::new();
+        for line in lines {
+            let elm: Vec<_> = line.split('=').map(|s| s.trim()).collect();
+            if elm.len() == 2 {
+                map.insert(elm[0].to_string(), elm[1].to_string());
+            }
+        }
+        return map;
+    }
+
     fn insert_entry(&self, key: MacAddr, value: Ipv4Addr) {
         // 利用中IPアドレスのテーブルにinsertする。insertしたら即ロックを解放する。
         let mut table_lock = self.used_ipaddr_table.write().unwrap();
@@ -160,7 +182,7 @@ fn main() {
     let server_socket = net::UdpSocket::bind("0.0.0.0:67").expect("Failed to bind socket");
     server_socket.set_broadcast(true).unwrap();
 
-    let address_lease_info = Arc::new(AddressLeaseInfo {
+    let address_lease_info = Arc::new(DhcpServer {
         used_ipaddr_table: RwLock::new(HashMap::new()),
         transaction_list:  RwLock::new(Vec::new())
     });
@@ -236,7 +258,7 @@ fn select_lease_ip() -> Result<Ipv4Addr, failure::Error> {
 fn dhcp_handler(
     packet: &DhcpPacket,
     soc: &net::UdpSocket,
-    address_lease_info: Arc<AddressLeaseInfo>,
+    address_lease_info: Arc<DhcpServer>,
 ) {
     // dhcpのヘッダ読み取り
     if let Some(message) = packet.get_option(OPTION_MESSAGE_TYPE_CODE) {
@@ -372,7 +394,7 @@ fn make_dhcp_packet<'a>(
         OPTION_SERVER_IDENTIFIER,
         4,
         Some(&mut vec![127, 0, 0, 1]),
-    );
+    ); // TODO: DHCPサーバのIP
     dhcp_packet.set_option(&mut cursor, OPTION_END, 0, None);
     Ok(dhcp_packet)
 }
