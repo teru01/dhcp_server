@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
-use std::{env, io, net, ptr, fs};
+use std::{env, fs, io, net, ptr, str};
 
 use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
 use pnet::packet::icmp::IcmpTypes;
@@ -14,8 +14,11 @@ use pnet::transport::{
     self, icmp_packet_iter, TransportChannelType, TransportProtocol::Ipv4, TransportReceiver,
     TransportSender,
 };
-use pnet::datalink::MacAddr;
+// use pnet::datalink::MacAddr;
 use pnet::util::checksum;
+use pnet::util::MacAddr;
+
+use ipnetwork::Ipv4Network;
 
 use failure;
 
@@ -59,13 +62,13 @@ const BOOTREPLY: u8 = 2;
 mod dhcp;
 use dhcp::DhcpPacket;
 
-#[test]
-fn test_is_ipaddr_already_in_use() {
-    assert_eq!(
-        true,
-        is_ipaddr_already_in_use("192.168.111.1".parse().unwrap()).unwrap()
-    );
-}
+// #[test]
+// fn test_is_ipaddr_already_in_use() {
+//     assert_eq!(
+//         true,
+//         is_ipaddr_already_in_use("192.168.111.1".parse().unwrap()).unwrap()
+//     );
+// }
 
 fn create_default_icmp_buffer() -> [u8; 8] {
     let mut buffer = [0u8; 8];
@@ -130,25 +133,116 @@ type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 
 struct DhcpServer {
     used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
-    address_pool: RwLock<Ipv4Addr>,
-    transaction_list: RwLock<Vec<u32>> //トランザクションIDのベクタ
+    address_pool: RwLock<Vec<Ipv4Addr>>,
+    transaction_list: RwLock<Vec<u32>>, //トランザクションIDのベクタ
+    server_address: Ipv4Addr,
+    default_gateway: Ipv4Addr,
+}
+
+#[test]
+fn test_init_address_pool() {
+    let mut used_ip = LeaseEntry::new();
+    used_ip.insert(
+        "f4:0f:24:27:aa:00".parse().unwrap(),
+        "192.168.111.3".parse().unwrap(),
+    );
+    used_ip.insert(
+        "f4:0f:24:27:ee:00".parse().unwrap(),
+        "192.168.111.23".parse().unwrap(),
+    );
+    used_ip.insert(
+        "f4:0f:24:27:db:00".parse().unwrap(),
+        "192.168.111.10".parse().unwrap(),
+    );
+    let mut env = HashMap::new();
+    env.insert("NETWORK_ADDR".to_string(), "192.168.111.0/24".to_string());
+    env.insert("DEFAULT_GATEWAY".to_string(), "192.168.111.1".to_string());
+    env.insert("SERVER_IDENTIFIER".to_string(), "192.168.111.2".to_string());
+    let v = match DhcpServer::init_address_pool(&used_ip, &env) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("{:?}", e);
+            return;
+        }
+    };
+    assert_eq!(v.len(), 249);
 }
 
 impl DhcpServer {
-    fn new() {
+    fn new() -> Result<DhcpServer, failure::Error> {
         // envから設定情報の読み込み
         // アドレスプールの設定、使用中マップの
         let env = Self::load_env();
+        let used_ipaddr_table = Self::init_used_ipaddr_table();
+        let addr_pool = Self::init_address_pool(&used_ipaddr_table, &env)?;
+        return Ok(DhcpServer {
+            used_ipaddr_table: RwLock::new(used_ipaddr_table),
+            address_pool: RwLock::new(addr_pool),
+            transaction_list: RwLock::new(Vec::new()),
+            server_address: env
+                .get("SERVER_IDENTIFIER")
+                .expect("Missing server_identifier")
+                .parse()
+                .unwrap(),
+            default_gateway: env
+                .get("DEFAULT_GATEWAY")
+                .expect("Missing default_gateway")
+                .parse()
+                .unwrap(),
+        });
+    }
 
+    // 新たなホストに割り当て可能なアドレスプールを初期化
+    // ネットワーク中のアドレスからデフォルトゲートウェイ、DHCPサーバ自身、ブロードキャストアドレス、ネットワークアドレス、すでに割り当て済みのIPアドレスを除く
+    fn init_address_pool(
+        used_ipaddr_table: &LeaseEntry,
+        env: &HashMap<String, String>,
+    ) -> Result<Vec<Ipv4Addr>, failure::Error> {
+        let network_addr_with_prefix: Ipv4Network = env
+            .get("NETWORK_ADDR")
+            .expect("Missing NETWORK_ADDR")
+            .parse()?;
+
+        let default_gateway = env
+            .get("DEFAULT_GATEWAY")
+            .expect("Missing DEFAULT_GATEWAY")
+            .parse()?;
+
+        let dhcp_server_addr = env
+            .get("SERVER_IDENTIFIER")
+            .expect("Missing SERVER_IDENTIFIER")
+            .parse()?;
+
+        let network_addr = network_addr_with_prefix.network();
+        let broadcast = network_addr_with_prefix.broadcast();
+
+        let mut used_ip_addrs: Vec<&Ipv4Addr> = used_ipaddr_table.values().collect();
+
+        used_ip_addrs.push(&default_gateway);
+        used_ip_addrs.push(&dhcp_server_addr);
+        used_ip_addrs.push(&network_addr);
+        used_ip_addrs.push(&broadcast);
+
+        let addr_pool: Vec<_> = network_addr_with_prefix
+            .iter() //0〜255までイテレートする
+            .filter(|addr| !used_ip_addrs.contains(&addr))
+            .collect();
+
+        return Ok(addr_pool);
+    }
+
+    // DBから使用中のIP情報を取得する
+    fn init_used_ipaddr_table() -> LeaseEntry {
+        return HashMap::new();
     }
 
     // 環境情報を読んでハッシュマップを返す
-    fn load_env() -> HashMap<String, String>{
+    fn load_env() -> HashMap<String, String> {
         let contents = fs::read_to_string(".env").expect("Failed to read env file");
         let lines: Vec<_> = contents.split('\n').collect();
         let mut map = HashMap::new();
         for line in lines {
-            let elm: Vec<_> = line.split('=').map(|s| s.trim()).collect();
+            let elm: Vec<_> = line.split('=').map(str::trim).collect();
             if elm.len() == 2 {
                 map.insert(elm[0].to_string(), elm[1].to_string());
             }
@@ -166,13 +260,11 @@ impl DhcpServer {
         let mut table_lock = self.used_ipaddr_table.read().unwrap();
         match table_lock.get(&key) {
             Some(ip) => return Some(ip.clone()),
-            None => return None
+            None => return None,
         };
     }
 
-    fn add_transaction_id(&self, id: u32) {
-
-    }
+    fn add_transaction_id(&self, id: u32) {}
 }
 
 fn main() {
@@ -182,10 +274,7 @@ fn main() {
     let server_socket = net::UdpSocket::bind("0.0.0.0:67").expect("Failed to bind socket");
     server_socket.set_broadcast(true).unwrap();
 
-    let address_lease_info = Arc::new(DhcpServer {
-        used_ipaddr_table: RwLock::new(HashMap::new()),
-        transaction_list:  RwLock::new(Vec::new())
-    });
+    let address_lease_info = Arc::new(DhcpServer::new().unwrap());
 
     loop {
         let mut recv_buf = [0u8; 1024];
@@ -255,11 +344,7 @@ fn select_lease_ip() -> Result<Ipv4Addr, failure::Error> {
     return Err(failure::err_msg("Could not decide available ip address."));
 }
 
-fn dhcp_handler(
-    packet: &DhcpPacket,
-    soc: &net::UdpSocket,
-    address_lease_info: Arc<DhcpServer>,
-) {
+fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, address_lease_info: Arc<DhcpServer>) {
     // dhcpのヘッダ読み取り
     if let Some(message) = packet.get_option(OPTION_MESSAGE_TYPE_CODE) {
         let message_type = message[0];
@@ -291,7 +376,6 @@ fn dhcp_handler(
                     // 利用中IPアドレスのテーブルにinsertする。insertしたら即ロックを解放する。
                     let mut table_lock = address_lease_info.used_ipaddr_table.write().unwrap();
                     table_lock.insert(packet.get_chaddr(), ip_to_be_leased);
-
                 }
 
                 if let Ok(dhcp_packet) =
@@ -309,17 +393,17 @@ fn dhcp_handler(
                 // トランザクションIDがあるか確認
 
                 // OFFERに対する返答（server_identifierがあるとき）自分と異なるなら破棄、別のDHCPが選ばれたから
-                    // リース期間などで変更されてるかもしれないので確認
-                    // 問題なければACKを返して、DBにマップをコミット
-                    // 問題あればNAKを返して、マップからエントリーを削除
+                // リース期間などで変更されてるかもしれないので確認
+                // 問題なければACKを返して、DBにマップをコミット
+                // 問題あればNAKを返して、マップからエントリーを削除
                 // リース延長、更新（server_idがない時)
-                    //ciaddrでレコード検索して、一致するものがあれば返す。なければNACK
+                //ciaddrでレコード検索して、一致するものがあれば返す。なければNACK
                 debug!("dhcp request");
                 // TODO: DBに使用ずみをコミット
                 let ip_to_be_leased = {
                     match address_lease_info.get_entry(packet.get_chaddr()) {
                         Some(ip) => ip.clone(),
-                        None => return
+                        None => return,
                     }
                 };
 
