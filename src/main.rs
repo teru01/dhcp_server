@@ -67,13 +67,13 @@ const BOOTREPLY: u8 = 2;
 mod dhcp;
 use dhcp::DhcpPacket;
 
-// #[test]
-// fn test_is_ipaddr_already_in_use() {
-//     assert_eq!(
-//         true,
-//         is_ipaddr_already_in_use("192.168.111.1".parse().unwrap()).unwrap()
-//     );
-// }
+#[test]
+fn test_is_ipaddr_already_in_use() {
+    assert_eq!(
+        true,
+        is_ipaddr_already_in_use("192.168.111.1".parse().unwrap()).unwrap()
+    );
+}
 
 fn create_default_icmp_buffer() -> [u8; 8] {
     let mut buffer = [0u8; 8];
@@ -178,8 +178,13 @@ impl DhcpServer {
         // envから設定情報の読み込み
         // アドレスプールの設定、使用中マップの
         let env = Self::load_env();
+
         let used_ipaddr_table = Self::init_used_ipaddr_table()?;
+        info!("There are {} leased entries", used_ipaddr_table.len());
+
         let addr_pool = Self::init_address_pool(&used_ipaddr_table, &env)?;
+        info!("There are {} addresses in the address pool", addr_pool.len());
+
         return Ok(DhcpServer {
             used_ipaddr_table: RwLock::new(used_ipaddr_table),
             address_pool: RwLock::new(addr_pool),
@@ -187,13 +192,11 @@ impl DhcpServer {
             server_address: env
                 .get("SERVER_IDENTIFIER")
                 .expect("Missing server_identifier")
-                .parse()
-                .unwrap(),
+                .parse()?,
             default_gateway: env
                 .get("DEFAULT_GATEWAY")
                 .expect("Missing default_gateway")
-                .parse()
-                .unwrap(),
+                .parse()?,
         });
     }
 
@@ -303,7 +306,12 @@ fn main() {
     let server_socket = net::UdpSocket::bind("0.0.0.0:67").expect("Failed to bind socket");
     server_socket.set_broadcast(true).unwrap();
 
-    let address_lease_info = Arc::new(DhcpServer::new().unwrap());
+    let dhcp_server = Arc::new(match DhcpServer::new() {
+        Ok(dhcp) => dhcp,
+        Err(e) => {
+            panic!("Failed to start dhcp server. {:?}", e);
+        }
+    });
 
     loop {
         let mut recv_buf = [0u8; 1024];
@@ -313,12 +321,12 @@ fn main() {
                 let client_socket = server_socket
                     .try_clone()
                     .expect("Failed to create client socket");
-                let addr_info = address_lease_info.clone();
+                let cloned_dhcp_server = dhcp_server.clone();
 
                 thread::spawn(move || {
                     if let Some(dhcp_packet) = DhcpPacket::new(&mut recv_buf[..size]) {
                         if dhcp_packet.get_op() == BOOTREQUEST {
-                            dhcp_handler(&dhcp_packet, &client_socket, addr_info);
+                            dhcp_handler(&dhcp_packet, &client_socket, cloned_dhcp_server);
                         }
                     }
                 });
@@ -373,7 +381,7 @@ fn select_lease_ip() -> Result<Ipv4Addr, failure::Error> {
     return Err(failure::err_msg("Could not decide available ip address."));
 }
 
-fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, address_lease_info: Arc<DhcpServer>) {
+fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<DhcpServer>) {
     // dhcpのヘッダ読み取り
     if let Some(message) = packet.get_option(OPTION_MESSAGE_TYPE_CODE) {
         let message_type = message[0];
@@ -391,7 +399,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, address_lease_info: A
 
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
-                let ip_to_be_leased = match select_lease_ip() {
+                let ip_to_be_leased = match select_lease_ip(dhcp_server.clone()) {
                     Ok(ip) => ip,
                     Err(msg) => {
                         // 付与できるIPがない場合。エラーを報告する。
@@ -403,7 +411,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, address_lease_info: A
 
                 {
                     // 利用中IPアドレスのテーブルにinsertする。insertしたら即ロックを解放する。
-                    let mut table_lock = address_lease_info.used_ipaddr_table.write().unwrap();
+                    let mut table_lock = dhcp_server.used_ipaddr_table.write().unwrap();
                     table_lock.insert(packet.get_chaddr(), ip_to_be_leased);
                 }
 
@@ -430,7 +438,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, address_lease_info: A
                 debug!("dhcp request");
                 // TODO: DBに使用ずみをコミット
                 let ip_to_be_leased = {
-                    match address_lease_info.get_entry(packet.get_chaddr()) {
+                    match dhcp_server.get_entry(packet.get_chaddr()) {
                         Some(ip) => ip.clone(),
                         None => return,
                     }
