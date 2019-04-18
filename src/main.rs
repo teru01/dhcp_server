@@ -30,6 +30,11 @@ extern crate log;
 use env_logger;
 use log::{debug, error, info, warn};
 
+extern crate rusqlite;
+
+use rusqlite::NO_PARAMS;
+use rusqlite::{Connection, RowIndex, Rows};
+
 /*
 TODO
 バイト列からDHCPパケットの生成
@@ -173,7 +178,7 @@ impl DhcpServer {
         // envから設定情報の読み込み
         // アドレスプールの設定、使用中マップの
         let env = Self::load_env();
-        let used_ipaddr_table = Self::init_used_ipaddr_table();
+        let used_ipaddr_table = Self::init_used_ipaddr_table()?;
         let addr_pool = Self::init_address_pool(&used_ipaddr_table, &env)?;
         return Ok(DhcpServer {
             used_ipaddr_table: RwLock::new(used_ipaddr_table),
@@ -232,8 +237,32 @@ impl DhcpServer {
     }
 
     // DBから使用中のIP情報を取得する
-    fn init_used_ipaddr_table() -> LeaseEntry {
-        return HashMap::new();
+    fn init_used_ipaddr_table() -> Result<LeaseEntry, failure::Error> {
+        let mut used_ip_map = LeaseEntry::new();
+
+        let con = Connection::open("dhcp.db")?;
+        let mut statement = con.prepare("SELECT (macaddr, ipaddr) FROM `lease_entry`")?;
+        let mut entries: Rows = statement.query(NO_PARAMS)?;
+        while let Some(entry) = entries.next()? {
+            let mac_addr: MacAddr = match entry.get(0) {
+                Ok(mac) => {
+                    let mac_string: String = mac;
+                    mac_string.parse().unwrap()
+                }
+                Err(_) => continue,
+            };
+
+            let ip_addr = match entry.get(1) {
+                Ok(ip) => {
+                    let ip_string: String = ip;
+                    ip_string.parse().unwrap()
+                }
+                Err(_) => continue,
+            };
+
+            used_ip_map.insert(mac_addr, ip_addr);
+        }
+        Ok(used_ip_map)
     }
 
     // 環境情報を読んでハッシュマップを返す
