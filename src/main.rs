@@ -46,12 +46,15 @@ DHCPパケットを作成してフィールドを埋める
 const HTYPE_ETHER: u8 = 1;
 const HLEN_MACADDR: u8 = 6;
 
-const OPTION_MESSAGE_TYPE_CODE: u8 = 53;
-
 const DHCP_SIZE: usize = 400;
-const OPTION_IP_ADDRESS_LEASE_TIME: u8 = 51;
-const OPTION_SERVER_IDENTIFIER: u8 = 54;
-const OPTION_END: u8 = 255;
+
+enum Code {
+    MessageType = 53,
+    IPAddressLeaseTime = 51,
+    ServerIdentifier = 54,
+    RequestedIpAddress = 50,
+    End = 255
+}
 
 const DHCPDISCOVER: u8 = 1;
 const DHCPOFFER: u8 = 2;
@@ -383,7 +386,7 @@ fn select_lease_ip() -> Result<Ipv4Addr, failure::Error> {
 
 fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<DhcpServer>) {
     // dhcpのヘッダ読み取り
-    if let Some(message) = packet.get_option(OPTION_MESSAGE_TYPE_CODE) {
+    if let Some(message) = packet.get_option(Code::MessageType as u8) {
         let message_type = message[0];
         let mut packet_buffer = [0u8; DHCP_SIZE];
         let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap(); //TODO: ブロードキャストをユニキャストに
@@ -500,22 +503,22 @@ fn make_dhcp_packet<'a>(
     dhcp_packet.set_magic_cookie(&mut cursor);
     dhcp_packet.set_option(
         &mut cursor,
-        OPTION_MESSAGE_TYPE_CODE,
+        Code::MessageType as u8,
         1,
         Some(&mut vec![message_type]),
     );
     dhcp_packet.set_option(
         &mut cursor,
-        OPTION_IP_ADDRESS_LEASE_TIME,
+        Code::IPAddressLeaseTime as u8,
         4,
         Some(&mut vec![0, 0, 1, 0]),
     ); //TODO: リースタイム変更
     dhcp_packet.set_option(
         &mut cursor,
-        OPTION_SERVER_IDENTIFIER,
+        Code::ServerIdentifier as u8,
         4,
         Some(&mut vec![127, 0, 0, 1]),
     ); // TODO: DHCPサーバのIP
-    dhcp_packet.set_option(&mut cursor, OPTION_END, 0, None);
+    dhcp_packet.set_option(&mut cursor, Code::End as u8, 0, None);
     Ok(dhcp_packet)
 }
