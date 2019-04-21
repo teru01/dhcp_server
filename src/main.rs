@@ -370,15 +370,29 @@ fn main() {
     }
 }
 
-// こうすると、icmpパケットの中身までも1つのパケットで生成できるが、EchoRequestがずっと生き続けるのでよくない
-// fn create_echo_request_packet() -> EchoRequestPacket<'static> {
-//     let buffer = vec![0u8; 8];
-//     let mut icmp_packet = MutableEchoRequestPacket::owned(buffer).unwrap();
-//     icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
-//     let checksum = checksum(icmp_packet.to_immutable().packet(), 16);
-//     icmp_packet.set_checksum(checksum);
-//     return icmp_packet.consume_to_immutable();
-// }
+fn u8_to_ipv4addr(buf: &[u8]) -> Result<Ipv4Addr, failure::Error> {
+    if buf.len() == 4 {
+        return Ok(Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]));
+    } else {
+        return Err(failure::err_msg("Could not get ip addr."));
+    }
+}
+
+// オプションからリクエストされたIPアドレスがあり、利用可能ならばそれを返す。
+fn obtain_available_ip_from_requested_option(dhcp_server: Arc<DhcpServer>, received_packet: &DhcpPacket) -> Result<Ipv4Addr, failure::Error> {
+    if let Some(ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
+        let requested_ip = u8_to_ipv4addr(&ip)?;
+        // アドレスプールからの検索
+        if let Some(ip_from_pool) = dhcp_server.pick_specified_ip(&requested_ip) {
+            let used = is_ipaddr_already_in_use(ip_from_pool.clone())?;
+            if !used {
+                return Ok(requested_ip);
+            }
+        }
+    }
+    // 本当はエラーじゃないのでエラーにするのは如何なものか。
+    return Err(failure::err_msg("not specify requested ip address"));
+}
 
 // 利用可能なIPアドレスを探す。
 // 以前リースされたものがあればそれを返し、なければアドレスプールから利用可能なIPアドレスを返却する。
