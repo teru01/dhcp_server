@@ -307,7 +307,7 @@ impl DhcpServer {
     fn pick_available_ip(&self) -> Option<Ipv4Addr> {
         let mut lock = self.address_pool.write().unwrap();
         return lock.pop();
-            }
+    }
 
     // ロックを取得し、アドレスプールから指定のアドレスを検索し、それを引き抜いて返す
     fn pick_specified_ip(&self, requested_ip: &Ipv4Addr) -> Option<Ipv4Addr> {
@@ -378,7 +378,10 @@ fn u8_to_ipv4addr(buf: &[u8]) -> Result<Ipv4Addr, failure::Error> {
 }
 
 // オプションからリクエストされたIPアドレスがあり、利用可能ならばそれを返す。
-fn obtain_available_ip_from_requested_option(dhcp_server: Arc<DhcpServer>, received_packet: &DhcpPacket) -> Result<Ipv4Addr, failure::Error> {
+fn obtain_available_ip_from_requested_option(
+    dhcp_server: Arc<DhcpServer>,
+    received_packet: &DhcpPacket,
+) -> Result<Ipv4Addr, failure::Error> {
     if let Some(ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
         let requested_ip = u8_to_ipv4addr(&ip)?;
         // アドレスプールからの検索
@@ -394,26 +397,36 @@ fn obtain_available_ip_from_requested_option(dhcp_server: Arc<DhcpServer>, recei
 }
 
 // 利用可能なIPアドレスを探す。
-// 以前リースされたものがあればそれを返し、なければアドレスプールから利用可能なIPアドレスを返却する。
-fn select_lease_ip() -> Result<Ipv4Addr, failure::Error> {
-    //TODO: MACアドレスでDB問い合わせ
-    //TODO: アドレスプールからIP取得
-    //TODO: Requested Ip Addrオプションからの取得
-    let addr_pool: [Ipv4Addr; 4] = [
-        "192.168.111.1".parse().unwrap(),
-        "192.168.111.89".parse().unwrap(),
-        "192.168.111.90".parse().unwrap(),
-        "192.168.111.91".parse().unwrap(),
-    ]; //ダミー
-    for target_ip in &addr_pool {
-        match is_ipaddr_already_in_use(target_ip.clone()) {
+// 要求されたものがあればそれを返し、
+// 以前リースされたものがあればそれを返し、
+// アドレスプールから利用可能なIPアドレスを返却する。
+fn select_lease_ip(
+    dhcp_server: Arc<DhcpServer>,
+    received_packet: &DhcpPacket,
+) -> Result<Ipv4Addr, failure::Error> {
+    // Requested Ip Addrオプションからの取得
+    if let Ok(ip_to_be_leased) =
+        obtain_available_ip_from_requested_option(dhcp_server.clone(), &received_packet)
+    {
+        dhcp_server.insert_entry(received_packet.get_chaddr(), ip_to_be_leased);
+        return Ok(ip_to_be_leased);
+    }
+
+    // usedからの取得
+    if let Some(ip_from_used) = dhcp_server.get_entry(received_packet.get_chaddr()) {
+        if let Ok(in_use) = is_ipaddr_already_in_use(&ip_from_used) {
+            if !in_use {
+                return Ok(ip_from_used);
+            }
+        }
+    }
+
+    // アドレスプールからの取得
+    while let Some(ip_addr) = dhcp_server.pick_available_ip() {
+        match is_ipaddr_already_in_use(&ip_addr) {
             Ok(used) => {
-                if used {
-                    // IPアドレスが利用されているなら別アドレスで再試行
-                    continue;
-                } else {
-                    // 利用されていないならそれを返す
-                    return Ok(target_ip.clone());
+                if !used {
+                    return Ok(ip_addr.clone());
                 }
             }
             Err(msg) => {
@@ -421,7 +434,7 @@ fn select_lease_ip() -> Result<Ipv4Addr, failure::Error> {
             }
         }
     }
-    return Err(failure::err_msg("Could not decide available ip address."));
+    return Err(failure::err_msg("Could not obtain available ip address."));
 }
 
 fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<DhcpServer>) {
@@ -442,7 +455,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<Dhcp
 
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
-                let ip_to_be_leased = match select_lease_ip(dhcp_server.clone()) {
+                let ip_to_be_leased = match select_lease_ip(dhcp_server.clone(), &packet) {
                     Ok(ip) => ip,
                     Err(msg) => {
                         // 付与できるIPがない場合。エラーを報告する。
