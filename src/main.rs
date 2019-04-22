@@ -53,7 +53,7 @@ enum Code {
     IPAddressLeaseTime = 51,
     ServerIdentifier = 54,
     RequestedIpAddress = 50,
-    End = 255
+    End = 255,
 }
 
 const DHCPDISCOVER: u8 = 1;
@@ -74,7 +74,7 @@ use dhcp::DhcpPacket;
 fn test_is_ipaddr_already_in_use() {
     assert_eq!(
         true,
-        is_ipaddr_already_in_use("192.168.111.1".parse().unwrap()).unwrap()
+        is_ipaddr_already_in_use(&"192.168.111.1".parse().unwrap()).unwrap()
     );
 }
 
@@ -89,7 +89,7 @@ fn create_default_icmp_buffer() -> [u8; 8] {
 
 // IPアドレスが既に使用されているか調べる。
 // TODO: tr, tsはArcを使えば生成は1回だけで良い？
-fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Error> {
+fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::Error> {
     let icmp_buf = create_default_icmp_buffer();
     let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
 
@@ -99,7 +99,7 @@ fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Error>
     )
     .unwrap();
     if transport_sender
-        .send_to(icmp_packet, IpAddr::V4(target_ip))
+        .send_to(icmp_packet, IpAddr::V4(target_ip.clone()))
         .is_err()
     {
         return Err(failure::err_msg("Failed to send icmp echo."));
@@ -141,8 +141,8 @@ type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 
 struct DhcpServer {
     used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
-    address_pool: RwLock<Vec<Ipv4Addr>>,
-    transaction_list: RwLock<Vec<u32>>, //トランザクションIDのベクタ
+    address_pool: RwLock<Vec<Ipv4Addr>>,   //利用可能なアドレス。降順に並ぶ。
+    transaction_list: RwLock<Vec<u32>>,    //トランザクションIDのベクタ
     server_address: Ipv4Addr,
     default_gateway: Ipv4Addr,
 }
@@ -186,7 +186,10 @@ impl DhcpServer {
         info!("There are {} leased entries", used_ipaddr_table.len());
 
         let addr_pool = Self::init_address_pool(&used_ipaddr_table, &env)?;
-        info!("There are {} addresses in the address pool", addr_pool.len());
+        info!(
+            "There are {} addresses in the address pool",
+            addr_pool.len()
+        );
 
         return Ok(DhcpServer {
             used_ipaddr_table: RwLock::new(used_ipaddr_table),
@@ -204,7 +207,8 @@ impl DhcpServer {
     }
 
     // 新たなホストに割り当て可能なアドレスプールを初期化
-    // ネットワーク中のアドレスからデフォルトゲートウェイ、DHCPサーバ自身、ブロードキャストアドレス、ネットワークアドレス、すでに割り当て済みのIPアドレスを除く
+    // ネットワーク中のアドレスからデフォルトゲートウェイ、DHCPサーバ自身、
+    // ブロードキャストアドレス、ネットワークアドレス、すでに割り当て済みのIPアドレスを除く
     fn init_address_pool(
         used_ipaddr_table: &LeaseEntry,
         env: &HashMap<String, String>,
@@ -379,7 +383,7 @@ fn obtain_available_ip_from_requested_option(dhcp_server: Arc<DhcpServer>, recei
         let requested_ip = u8_to_ipv4addr(&ip)?;
         // アドレスプールからの検索
         if let Some(ip_from_pool) = dhcp_server.pick_specified_ip(&requested_ip) {
-            let used = is_ipaddr_already_in_use(ip_from_pool.clone())?;
+            let used = is_ipaddr_already_in_use(&ip_from_pool)?;
             if !used {
                 return Ok(requested_ip);
             }
