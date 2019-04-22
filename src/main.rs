@@ -300,15 +300,10 @@ impl DhcpServer {
     }
 
     // ロックを取得し、アドレスプールの最後を引き抜いて返す
-    fn pick_available_ip(&self) -> Ipv4Addr {
+    fn pick_available_ip(&self) -> Option<Ipv4Addr> {
         let mut lock = self.address_pool.write().unwrap();
-        match lock.pop() {
-            Some(ip) => {
-                return ip.clone();
+        return lock.pop();
             }
-            None => panic!("Cannot lease ip addr"),
-        };
-    }
 
     // ロックを取得し、アドレスプールから指定のアドレスを検索し、それを引き抜いて返す
     fn pick_specified_ip(&self, requested_ip: &Ipv4Addr) -> Option<Ipv4Addr> {
