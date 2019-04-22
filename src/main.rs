@@ -323,9 +323,10 @@ impl DhcpServer {
         None
     }
 
-    // fn remove_specified_ip(&self, )
-
-    fn add_transaction_id(&self, id: u32) {}
+    fn add_transaction_id(&self, id: u32) {
+        let mut lock = self.transaction_list.write().unwrap();
+        lock.push(id);
+    }
 }
 
 fn main() {
@@ -437,7 +438,7 @@ fn select_lease_ip(
     return Err(failure::err_msg("Could not obtain available ip address."));
 }
 
-fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<DhcpServer>) {
+fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<DhcpServer>) -> Result<(), failure::Error> {
     // dhcpのヘッダ読み取り
     if let Some(message) = packet.get_option(Code::MessageType as u8) {
         let message_type = message[0];
@@ -452,33 +453,23 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<Dhcp
                 // この際、クライアントのrequested ip address、chaddrで照合した以前リースしたIP、アドレスプールから選んだ値の優先順にIPを選んで返す
                 // chaddrと返したIPのマップ、トランザクションIDを記録しておく
                 debug!("dhcp discover");
+                dhcp_server.add_transaction_id(transaction_id);
 
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
-                let ip_to_be_leased = match select_lease_ip(dhcp_server.clone(), &packet) {
-                    Ok(ip) => ip,
-                    Err(msg) => {
-                        // 付与できるIPがない場合。エラーを報告する。
-                        // TODO: DHCPNAKをクライアントに送信する。
-                        error!("{}", msg);
-                        return;
-                    }
-                };
+                let ip_to_be_leased = select_lease_ip(dhcp_server.clone(), &packet)?;
 
-                {
-                    // 利用中IPアドレスのテーブルにinsertする。insertしたら即ロックを解放する。
-                    let mut table_lock = dhcp_server.used_ipaddr_table.write().unwrap();
-                    table_lock.insert(packet.get_chaddr(), ip_to_be_leased);
-                }
+                dhcp_server.insert_entry(packet.get_chaddr(), ip_to_be_leased);
 
                 if let Ok(dhcp_packet) =
                     make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, &ip_to_be_leased)
                 {
-                    soc.send_to(dhcp_packet.get_buffer(), dest)
-                        .expect("failed to send");
+                    if soc.send_to(dhcp_packet.get_buffer(), dest).is_err() {
+                        error!("Failed to send DHCPOFFER message");
+                    }
                     println!("send dhcp offer");
                 }
-                return;
+                return Ok(());
             }
 
             DHCPREQUEST => {
