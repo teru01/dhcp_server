@@ -66,6 +66,11 @@ impl<'a> DhcpPacket<'a> {
         MacAddr::new(b[0], b[1], b[2], b[3], b[4], b[5])
     }
 
+    pub fn get_ciaddr(&self) -> Ipv4Addr {
+        let b = &self.buffer[CIADDR..YIADDR];
+        Ipv4Addr::new(b[0], b[1], b[2], b[3])
+    }
+
     pub fn set_op(&mut self, op: u8) {
         self.buffer[OP] = op;
     }
