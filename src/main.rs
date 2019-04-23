@@ -176,6 +176,15 @@ fn test_init_address_pool() {
     assert_eq!(v.len(), 249);
 }
 
+#[test]
+fn test_dhcpserver_init() {
+    let dhcp_server = DhcpServer::new().unwrap();
+    let used_ip_table = dhcp_server.used_ipaddr_table.read().unwrap();
+    assert_eq!(used_ip_table.len(), 1);
+    let address_pool = dhcp_server.address_pool.read().unwrap();
+    assert_eq!(address_pool.len(), 256 - 4 - used_ip_table.len());
+}
+
 impl DhcpServer {
     fn new() -> Result<DhcpServer, failure::Error> {
         // envから設定情報の読み込み
@@ -231,6 +240,7 @@ impl DhcpServer {
         let network_addr = network_addr_with_prefix.network();
         let broadcast = network_addr_with_prefix.broadcast();
 
+        // すでに使用されているアドレス。
         let mut used_ip_addrs: Vec<&Ipv4Addr> = used_ipaddr_table.values().collect();
 
         used_ip_addrs.push(&default_gateway);
@@ -251,7 +261,7 @@ impl DhcpServer {
         let mut used_ip_map = LeaseEntry::new();
 
         let con = Connection::open("dhcp.db")?;
-        let mut statement = con.prepare("SELECT (macaddr, ipaddr) FROM `lease_entry`")?;
+        let mut statement = con.prepare("SELECT mac_addr, ip_addr FROM lease_entry")?;
         let mut entries: Rows = statement.query(NO_PARAMS)?;
         while let Some(entry) = entries.next()? {
             let mac_addr: MacAddr = match entry.get(0) {
@@ -326,6 +336,15 @@ impl DhcpServer {
     fn add_transaction_id(&self, id: u32) {
         let mut lock = self.transaction_list.write().unwrap();
         lock.push(id);
+    }
+
+    fn has_trainsaction_id(&self, target_id: u32) -> bool {
+        let lock = self.transaction_list.read().unwrap();
+        let mut iter = lock.iter();
+        if let Some(_) = iter.find(|id| **id == target_id) {
+            return true;
+        }
+        return false;
     }
 }
 
@@ -438,7 +457,11 @@ fn select_lease_ip(
     return Err(failure::err_msg("Could not obtain available ip address."));
 }
 
-fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<DhcpServer>) -> Result<(), failure::Error> {
+fn dhcp_handler(
+    packet: &DhcpPacket,
+    soc: &net::UdpSocket,
+    dhcp_server: Arc<DhcpServer>,
+) -> Result<(), failure::Error> {
     // dhcpのヘッダ読み取り
     if let Some(message) = packet.get_option(Code::MessageType as u8) {
         let message_type = message[0];
@@ -461,13 +484,16 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<Dhcp
 
                 dhcp_server.insert_entry(packet.get_chaddr(), ip_to_be_leased);
 
-                if let Ok(dhcp_packet) =
-                    make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, &ip_to_be_leased)
-                {
-                    if soc.send_to(dhcp_packet.get_buffer(), dest).is_err() {
-                        error!("Failed to send DHCPOFFER message");
+                match make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, &ip_to_be_leased) {
+                    Ok(dhcp_packet) => {
+                        if soc.send_to(dhcp_packet.get_buffer(), dest).is_err() {
+                            error!("Failed to send DHCPOFFER message");
+                        }
+                        debug!("send DHCPOFFER");
                     }
-                    println!("send dhcp offer");
+                    Err(e) => {
+                        error!("Failded to make dhcp packet");
+                    }
                 }
                 return Ok(());
             }
@@ -487,7 +513,7 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<Dhcp
                 let ip_to_be_leased = {
                     match dhcp_server.get_entry(packet.get_chaddr()) {
                         Some(ip) => ip.clone(),
-                        None => return,
+                        None => return Ok(()),
                     }
                 };
 
@@ -497,31 +523,31 @@ fn dhcp_handler(packet: &DhcpPacket, soc: &net::UdpSocket, dhcp_server: Arc<Dhcp
                     soc.send_to(dhcp_packet.get_buffer(), dest)
                         .expect("Failed to send");
                 }
-                return;
+                return Ok(());
             }
 
             DHCPRELEASE => {
                 // IPを利用可能としてアドレスプールに戻す
                 // マップからエントリの削除。アドレスプールへの追加
                 debug!("dhcp release");
-                return;
+                return Ok(());
             }
 
             DHCPDECLINE => {
                 // クライアントがARPした際に衝突していたらこれが届く。
                 // 利用不可能なIPとしてマークする。=> アドレスプールからの削除
                 debug!("dhcp decline");
-                return;
+                return Ok(());
             }
 
             _ => {
                 warn!("message_type: {}", message_type);
-                return;
+                return Ok(());
             }
         }
     } else {
         error!("option not found");
-        return;
+        return Ok(());
     }
 }
 
