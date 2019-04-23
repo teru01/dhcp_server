@@ -137,16 +137,6 @@ fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::Error
     }
 }
 
-type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
-
-struct DhcpServer {
-    used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
-    address_pool: RwLock<Vec<Ipv4Addr>>,   //利用可能なアドレス。降順に並ぶ。
-    transaction_list: RwLock<Vec<u32>>,    //トランザクションIDのベクタ
-    server_address: Ipv4Addr,
-    default_gateway: Ipv4Addr,
-}
-
 #[test]
 fn test_init_address_pool() {
     let mut used_ip = LeaseEntry::new();
@@ -183,6 +173,16 @@ fn test_dhcpserver_init() {
     assert_eq!(used_ip_table.len(), 1);
     let address_pool = dhcp_server.address_pool.read().unwrap();
     assert_eq!(address_pool.len(), 256 - 4 - used_ip_table.len());
+}
+
+type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
+
+struct DhcpServer {
+    used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
+    address_pool: RwLock<Vec<Ipv4Addr>>,   //利用可能なアドレス。降順に並ぶ。
+    transaction_list: RwLock<Vec<u32>>,    //トランザクションIDのベクタ
+    server_address: Ipv4Addr,
+    default_gateway: Ipv4Addr,
 }
 
 impl DhcpServer {
@@ -490,7 +490,7 @@ fn dhcp_handler(
                 dhcp_server.insert_entry(packet.get_chaddr(), ip_to_be_leased);
 
                 let dhcp_packet =
-                    make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, &ip_to_be_leased)?;
+                    make_dhcp_packet(&packet, &dhcp_server, DHCPOFFER, &mut packet_buffer, &ip_to_be_leased)?;
                 soc.send_to(dhcp_packet.get_buffer(), dest)?;
 
                 debug!("send DHCPOFFER");
@@ -519,6 +519,7 @@ fn dhcp_handler(
                             // ACKを返して、DBにマップをコミット
                             let dhcp_packet = make_dhcp_packet(
                                 &packet,
+                                &dhcp_server,
                                 DHCPACK,
                                 &mut packet_buffer,
                                 &ip_to_be_leased,
@@ -544,13 +545,14 @@ fn dhcp_handler(
                             let prev_ip = packet.get_ciaddr();
                             if prev_ip != ip_to_be_leased {
                                 // NAKを返す
-                                let dhcp_packet = make_dhcp_packet(&packet, DHCPNAK, &mut packet_buffer, &prev_ip)?;
+                                let dhcp_packet = make_dhcp_packet(&packet, &dhcp_server, DHCPNAK, &mut packet_buffer, &prev_ip)?;
                                 soc.send_to(dhcp_packet.get_buffer(), dest)?;
                                 return Ok(());
                             }
                             // ACKを返す。
                             let dhcp_packet = make_dhcp_packet(
                                 &packet,
+                                &dhcp_server,
                                 DHCPACK,
                                 &mut packet_buffer,
                                 &ip_to_be_leased,
@@ -589,6 +591,7 @@ fn dhcp_handler(
 
 fn make_dhcp_packet<'a>(
     incoming_packet: &DhcpPacket,
+    dhcp_server: &DhcpServer,
     message_type: u8,
     buffer: &'a mut [u8],
     target_ip: &Ipv4Addr,
@@ -611,20 +614,20 @@ fn make_dhcp_packet<'a>(
         &mut cursor,
         Code::MessageType as u8,
         1,
-        Some(&mut vec![message_type]),
+        Some(&vec![message_type]),
     );
     dhcp_packet.set_option(
         &mut cursor,
         Code::IPAddressLeaseTime as u8,
         4,
-        Some(&mut vec![0, 0, 1, 0]),
+        Some(&vec![0, 0, 1, 0]),
     ); //TODO: リースタイム変更
     dhcp_packet.set_option(
         &mut cursor,
         Code::ServerIdentifier as u8,
         4,
-        Some(&mut vec![127, 0, 0, 1]),
-    ); // TODO: DHCPサーバのIP
+        Some(&dhcp_server.server_address.octets()),
+    );
     dhcp_packet.set_option(&mut cursor, Code::End as u8, 0, None);
     Ok(dhcp_packet)
 }
