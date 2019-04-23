@@ -177,7 +177,7 @@ impl<'a> DhcpPacket<'a> {
     pub fn get_option(&self, option_code: u8) -> Option<Vec<u8>> {
         let mut index: usize = 4; // 最初の4バイトはクッキー
         let options = self.get_options();
-        while index < OPTION_END as usize {
+        while options[index] != OPTION_END {
             if options[index] == option_code {
                 let len = options[index + 1];
                 let buf_index = index + 2;
@@ -186,8 +186,10 @@ impl<'a> DhcpPacket<'a> {
             } else if options[index] == 0 {
                 index += 1;
             } else {
-                let len = options[index + 1];
-                index += 1 + len as usize;
+                index += 1; // on the 'len' field
+                let len = options[index];
+                index += 1; // on the first byte of value.
+                index += len as usize;
             }
         }
         None
