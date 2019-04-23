@@ -33,7 +33,7 @@ use log::{debug, error, info, warn};
 extern crate rusqlite;
 
 use rusqlite::NO_PARAMS;
-use rusqlite::{Connection, RowIndex, Rows};
+use rusqlite::{params, Connection, Rows};
 
 /*
 TODO
@@ -480,48 +480,84 @@ fn dhcp_handler(
 
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
-                let ip_to_be_leased = select_lease_ip(dhcp_server.clone(), &packet)?;
+                let ip_to_be_leased = match select_lease_ip(dhcp_server.clone(), &packet) {
+                    Ok(ip) => ip,
+                    Err(e) => {
+                        panic!("{}", e);
+                    }
+                };
 
                 dhcp_server.insert_entry(packet.get_chaddr(), ip_to_be_leased);
 
-                match make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, &ip_to_be_leased) {
-                    Ok(dhcp_packet) => {
-                        if soc.send_to(dhcp_packet.get_buffer(), dest).is_err() {
-                            error!("Failed to send DHCPOFFER message");
-                        }
-                        debug!("send DHCPOFFER");
-                    }
-                    Err(e) => {
-                        error!("Failded to make dhcp packet");
-                    }
-                }
+                let dhcp_packet =
+                    make_dhcp_packet(&packet, DHCPOFFER, &mut packet_buffer, &ip_to_be_leased)?;
+                soc.send_to(dhcp_packet.get_buffer(), dest)?;
+
+                debug!("send DHCPOFFER");
                 return Ok(());
             }
 
             DHCPREQUEST => {
+                debug!("dhcp request");
                 // クライアントからのリクエストを受け取る。
                 // トランザクションIDがあるか確認
+                if !dhcp_server.has_trainsaction_id(transaction_id) {
+                    error!("transaction_id not found");
+                    return Ok(());
+                }
+                match packet.get_option(Code::ServerIdentifier as u8) {
+                    // OFFERに対する返答
+                    Some(server_id) => {
+                        let server_ip = u8_to_ipv4addr(&server_id)?;
+                        if server_ip != dhcp_server.server_address {
+                            // クライアントは別のDHCPサーバを選択
+                            info!("Client has chosen another dhcp server.");
+                            return Ok(());
+                        }
+                        let client_macaddr = packet.get_chaddr();
+                        if let Some(ip_to_be_leased) = dhcp_server.get_entry(client_macaddr) {
+                            // ACKを返して、DBにマップをコミット
+                            let dhcp_packet = make_dhcp_packet(
+                                &packet,
+                                DHCPACK,
+                                &mut packet_buffer,
+                                &ip_to_be_leased,
+                            )?;
+                            soc.send_to(dhcp_packet.get_buffer(), dest)?;
+                            let mut con = Connection::open("dhcp.db")?;
+                            let tx = con.transaction()?;
+                            tx.execute(
+                                "INSERT INTO lease_entry (mac_addr, ip_addr) values (?1, ?2)",
+                                params![client_macaddr.to_string(), ip_to_be_leased.to_string()],
+                            )?;
+                            tx.commit()?;
 
-                // OFFERに対する返答（server_identifierがあるとき）自分と異なるなら破棄、別のDHCPが選ばれたから
-                // リース期間などで変更されてるかもしれないので確認
-                // 問題なければACKを返して、DBにマップをコミット
-                // 問題あればNAKを返して、マップからエントリーを削除
-                // リース延長、更新（server_idがない時)
-                //ciaddrでレコード検索して、一致するものがあれば返す。なければNACK
-                debug!("dhcp request");
-                // TODO: DBに使用ずみをコミット
-                let ip_to_be_leased = {
-                    match dhcp_server.get_entry(packet.get_chaddr()) {
-                        Some(ip) => ip.clone(),
-                        None => return Ok(()),
+                            debug!("DB updated");
+                        }
+                        return Ok(());
                     }
-                };
-
-                if let Ok(dhcp_packet) =
-                    make_dhcp_packet(&packet, DHCPACK, &mut packet_buffer, &ip_to_be_leased)
-                {
-                    soc.send_to(dhcp_packet.get_buffer(), dest)
-                        .expect("Failed to send");
+                    // リース延長
+                    None => {
+                        // ACKを返す。
+                        let client_macaddr = packet.get_chaddr();
+                        if let Some(ip_to_be_leased) = dhcp_server.get_entry(client_macaddr) {
+                            let prev_ip = packet.get_ciaddr();
+                            if prev_ip != ip_to_be_leased {
+                                // NAKを返す
+                                let dhcp_packet = make_dhcp_packet(&packet, DHCPNAK, &mut packet_buffer, &prev_ip)?;
+                                soc.send_to(dhcp_packet.get_buffer(), dest)?;
+                                return Ok(());
+                            }
+                            // ACKを返す。
+                            let dhcp_packet = make_dhcp_packet(
+                                &packet,
+                                DHCPACK,
+                                &mut packet_buffer,
+                                &ip_to_be_leased,
+                            )?;
+                            soc.send_to(dhcp_packet.get_buffer(), dest)?;
+                        }
+                    }
                 }
                 return Ok(());
             }
