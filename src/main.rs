@@ -106,7 +106,6 @@ type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 struct DhcpServer {
     used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
     address_pool: RwLock<Vec<Ipv4Addr>>,   //利用可能なアドレス。降順に並ぶ。
-    transaction_list: RwLock<Vec<u32>>,    //トランザクションIDのベクタ
     server_address: Ipv4Addr,
     default_gateway: Ipv4Addr,
 }
@@ -129,7 +128,6 @@ impl DhcpServer {
         return Ok(DhcpServer {
             used_ipaddr_table: RwLock::new(used_ipaddr_table),
             address_pool: RwLock::new(addr_pool),
-            transaction_list: RwLock::new(Vec::new()),
             server_address: env
                 .get("SERVER_IDENTIFIER")
                 .expect("Missing server_identifier")
@@ -257,20 +255,6 @@ impl DhcpServer {
             }
         }
         None
-    }
-
-    fn add_transaction_id(&self, id: u32) {
-        let mut lock = self.transaction_list.write().unwrap();
-        lock.push(id);
-    }
-
-    fn has_trainsaction_id(&self, target_id: u32) -> bool {
-        let lock = self.transaction_list.read().unwrap();
-        let mut iter = lock.iter();
-        if let Some(_) = iter.find(|id| **id == target_id) {
-            return true;
-        }
-        return false;
     }
 }
 
@@ -400,7 +384,6 @@ fn dhcp_handler(
                 // この際、クライアントのrequested ip address、chaddrで照合した以前リースしたIP、アドレスプールから選んだ値の優先順にIPを選んで返す
                 // chaddrと返したIPのマップ、トランザクションIDを記録しておく
                 debug!("{}: received DHCPDISCOVER", transaction_id);
-                dhcp_server.add_transaction_id(transaction_id);
 
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
@@ -430,12 +413,6 @@ fn dhcp_handler(
 
             DHCPREQUEST => {
                 // クライアントからのリクエストを受け取る。
-                // トランザクションIDがあるか確認 => 違う。それはクライアントの挙動
-                if !dhcp_server.has_trainsaction_id(transaction_id) {
-                    // TODO: DHCP鯖が終了して、クライアントだけ起き続けていた場合にここを通ってしまう。
-                    error!("transaction_id not found");
-                    return Ok(());
-                }
                 match packet.get_option(Code::ServerIdentifier as u8) {
                     // OFFERに対する返答
                     Some(server_id) => {
