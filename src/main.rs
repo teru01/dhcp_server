@@ -430,7 +430,7 @@ fn dhcp_handler(
 
             DHCPREQUEST => {
                 // クライアントからのリクエストを受け取る。
-                // トランザクションIDがあるか確認
+                // トランザクションIDがあるか確認 => 違う。それはクライアントの挙動
                 if !dhcp_server.has_trainsaction_id(transaction_id) {
                     // TODO: DHCP鯖が終了して、クライアントだけ起き続けていた場合にここを通ってしまう。
                     error!("transaction_id not found");
@@ -439,7 +439,7 @@ fn dhcp_handler(
                 match packet.get_option(Code::ServerIdentifier as u8) {
                     // OFFERに対する返答
                     Some(server_id) => {
-                        debug!("{}: received DHCPREQUEST without server_id", transaction_id);
+                        debug!("{}: received DHCPREQUEST with server_id", transaction_id);
                         let server_ip = util::u8_to_ipv4addr(&server_id)?;
                         if server_ip != dhcp_server.server_address {
                             // クライアントは別のDHCPサーバを選択
@@ -463,7 +463,7 @@ fn dhcp_handler(
                             let tx = con.transaction()?;
                             // macaddrがすでに存在する場合がある。（起動後DBに保存されていたもの、または途中でrequest_ipを変更する）
                             let count = match tx.execute(
-                                "SELECT COUNT (*) from lease_entry where mac_addr = ?",
+                                "SELECT COUNT (*) FROM lease_entry WHERE mac_addr = ?",
                                 params![client_macaddr.to_string()],
                             ) {
                                 Ok(count) => count,
@@ -476,7 +476,7 @@ fn dhcp_handler(
                             if count == 0 {
                                 // レコードがないならinsert
                                 tx.execute(
-                                    "INSERT INTO lease_entry (mac_addr, ip_addr) values (?1, ?2)",
+                                    "INSERT INTO lease_entry (mac_addr, ip_addr) VALUES (?1, ?2)",
                                     params![client_macaddr.to_string(), ip_to_be_leased.to_string()],
                                 )?;
                             } else {
@@ -490,9 +490,9 @@ fn dhcp_handler(
                         }
                         return Ok(());
                     }
-                    // リース延長 or IP更新？ requested_ip_addrが変更する場合はここか？
+                    // リース延長 or IP更新(= dhcp informらしいので未対応にする)？
                     None => {
-                        debug!("{}: received DHCPREQUEST with server_id", transaction_id);
+                        debug!("{}: received DHCPREQUEST without server_id", transaction_id);
                         // ACKを返す。
                         let client_macaddr = packet.get_chaddr();
                         if let Some(ip_to_be_leased) = dhcp_server.get_entry(client_macaddr) {
@@ -542,7 +542,7 @@ fn dhcp_handler(
 
             _ => {
                 warn!(
-                    "{}: received undefined message, message_type:{}",
+                    "{}: received unimplemented message, message_type:{}",
                     transaction_id, message_type
                 );
                 return Ok(());
