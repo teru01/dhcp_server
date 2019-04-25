@@ -113,7 +113,6 @@ type TransactionTable = HashMap<u32, TransactionInfo>;
 struct DhcpServer {
     used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
     address_pool: RwLock<Vec<Ipv4Addr>>,   //利用可能なアドレス。降順に並ぶ。
-    transaction_map: RwLock<TransactionTable>,    // トランザクション間で引き継ぐ情報
     server_address: Ipv4Addr,
     default_gateway: Ipv4Addr,
 }
@@ -136,7 +135,6 @@ impl DhcpServer {
         return Ok(DhcpServer {
             used_ipaddr_table: RwLock::new(used_ipaddr_table),
             address_pool: RwLock::new(addr_pool),
-            transaction_map: RwLock::new(TransactionTable::new()),
             server_address: env
                 .get("SERVER_IDENTIFIER")
                 .expect("Missing server_identifier")
@@ -265,20 +263,6 @@ impl DhcpServer {
         }
         None
     }
-
-    fn add_transaction_entry(&self, id: u32, info: &TransactionInfo) {
-        let mut lock = self.transaction_map.write().unwrap();
-        lock.insert(id, info.clone());
-    }
-
-    // fn has_trainsaction_id(&self, target_id: u32) -> bool {
-    //     let lock = self.transaction_map.read().unwrap();
-    //     let mut iter = lock.iter();
-    //     if let Some(_) = iter.find(|id| **id == target_id) {
-    //         return true;
-    //     }
-    //     return false;
-    // }
 }
 
 fn main() {
@@ -406,7 +390,7 @@ fn dhcp_handler(
                 // OFFERを返却する。
                 // この際、クライアントのrequested ip address、chaddrで照合した以前リースしたIP、アドレスプールから選んだ値の優先順にIPを選んで返す
                 // chaddrと返したIPのマップ、トランザクションIDを記録しておく
-                debug!("{}: received DHCPDISCOVER", transaction_id);
+                info!("{}: received DHCPDISCOVER", transaction_id);
 
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
@@ -430,7 +414,7 @@ fn dhcp_handler(
                 )?;
                 soc.send_to(dhcp_packet.get_buffer(), dest)?;
 
-                debug!("{}: sent DHCPREQUEST", transaction_id);
+                info!("{}: sent DHCPOFFER", transaction_id);
                 return Ok(());
             }
 
@@ -439,40 +423,33 @@ fn dhcp_handler(
                 match packet.get_option(Code::ServerIdentifier as u8) {
                     // OFFERに対する返答
                     Some(server_id) => {
-                        debug!("{}: received DHCPREQUEST with server_id", transaction_id);
+                        info!("{}: received DHCPREQUEST with server_id", transaction_id);
                         let server_ip = util::u8_to_ipv4addr(&server_id)?;
                         if server_ip != dhcp_server.server_address {
-                            // クライアントは別のDHCPサーバを選択
+                            // クライアントは別のDHCPサーバを選択。TODO: usedからエントリを削除。アドレスプールに返す
                             info!("Client has chosen another dhcp server.");
                             return Ok(());
                         }
                         let client_macaddr = packet.get_chaddr();
                         if let Some(ip_to_be_leased) = dhcp_server.get_entry(client_macaddr) {
-                            // ACKを返して、DBにマップをコミット
-                            let dhcp_packet = make_dhcp_packet(
-                                &packet,
-                                &dhcp_server,
-                                DHCPACK,
-                                &mut packet_buffer,
-                                &ip_to_be_leased,
-                            )?;
-                            soc.send_to(dhcp_packet.get_buffer(), dest)?;
-                            debug!("{}: sent DHCPACK", transaction_id);
-
                             let mut con = Connection::open("dhcp.db")?;
                             let tx = con.transaction()?;
-                            // macaddrがすでに存在する場合がある。（起動後DBに保存されていたもの、または途中でrequest_ipを変更する）
-                            let count = match tx.execute(
-                                "SELECT COUNT (*) FROM lease_entry WHERE mac_addr = ?",
-                                params![client_macaddr.to_string()],
-                            ) {
-                                Ok(count) => count,
-                                Err(e) => {
-                                    error!("{:?}", e);
-                                    return Ok(());
+                            // macaddrがすでに存在する場合がある。（起動後DBに保存されていたもの、または途中でrequest_ipを変更する
+                            let count : i32 = {
+                                let mut stmnt = tx.prepare(
+                                    "SELECT COUNT (*) FROM lease_entry WHERE mac_addr = ?",
+                                ).unwrap();
+                                let mut count_result = stmnt.query(params![client_macaddr.to_string()]).unwrap();
+
+                                match count_result.next()? {
+                                    Some(row) => {
+                                        row.get(0)?
+                                    },
+                                    None => {
+                                        return Err(failure::err_msg("Failed to count rows"));
+                                    }
                                 }
                             };
-                            debug!("after select count");
                             if count == 0 {
                                 // レコードがないならinsert
                                 tx.execute(
@@ -485,14 +462,32 @@ fn dhcp_handler(
                                     params![ip_to_be_leased.to_string(), client_macaddr.to_string()],
                                 )?;
                             }
+
+                            // ACKを返して、DBにマップをコミット
+                            let dhcp_packet = make_dhcp_packet(
+                                &packet,
+                                &dhcp_server,
+                                DHCPACK,
+                                &mut packet_buffer,
+                                &ip_to_be_leased,
+                            )?;
+                            soc.send_to(dhcp_packet.get_buffer(), dest)?;
+                            info!("{}: sent DHCPACK", transaction_id);
+
+                            // パケット送信で失敗すればこれは実行されずにロールバックされる。=> DBの整合性は保たれる
                             tx.commit()?;
-                            debug!("{}: DB updated", transaction_id);
+                            debug!("{}: leased address: {}", transaction_id, ip_to_be_leased);
+                            if count == 0 {
+                                debug!("{}: inserted into DB", transaction_id);
+                            } else {
+                                debug!("{}: updated DB", transaction_id);
+                            }
                         }
                         return Ok(());
                     }
                     // リース延長 or IP更新(= dhcp informらしいので未対応にする)？
                     None => {
-                        debug!("{}: received DHCPREQUEST without server_id", transaction_id);
+                        info!("{}: received DHCPREQUEST without server_id", transaction_id);
                         // ACKを返す。
                         let client_macaddr = packet.get_chaddr();
                         if let Some(ip_to_be_leased) = dhcp_server.get_entry(client_macaddr) {
@@ -507,7 +502,7 @@ fn dhcp_handler(
                                     &prev_ip,
                                 )?;
                                 soc.send_to(dhcp_packet.get_buffer(), dest)?;
-                                debug!("{}: sent DHCPNAK", transaction_id);
+                                info!("{}: sent DHCPNAK", transaction_id);
                                 return Ok(());
                             }
                             // ACKを返す。
@@ -519,7 +514,7 @@ fn dhcp_handler(
                                 &ip_to_be_leased,
                             )?;
                             soc.send_to(dhcp_packet.get_buffer(), dest)?;
-                            debug!("{}: sent DHCPACK", transaction_id);
+                            info!("{}: sent DHCPACK", transaction_id);
                         }
                     }
                 }
@@ -529,14 +524,14 @@ fn dhcp_handler(
             DHCPRELEASE => {
                 // IPを利用可能としてアドレスプールに戻す
                 // マップからエントリの削除。アドレスプールへの追加
-                debug!("{}: received DHCPRELEASE", transaction_id);
+                info!("{}: received DHCPRELEASE", transaction_id);
                 return Ok(());
             }
 
             DHCPDECLINE => {
                 // クライアントがARPした際に衝突していたらこれが届く。
                 // 利用不可能なIPとしてマークする。=> アドレスプールからの削除
-                debug!("{}: received DHCPDECLINE", transaction_id);
+                info!("{}: received DHCPDECLINE", transaction_id);
                 return Ok(());
             }
 
