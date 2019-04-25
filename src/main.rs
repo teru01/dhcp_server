@@ -244,6 +244,11 @@ impl DhcpServer {
         };
     }
 
+    fn pick_entry(&self, mac_addr: MacAddr) -> Option<Ipv4Addr> {
+        let mut table_lock = self.used_ipaddr_table.write().unwrap();
+        return table_lock.remove(&mac_addr);
+    }
+
     // ロックを取得し、アドレスプールの最後を引き抜いて返す
     fn pick_available_ip(&self) -> Option<Ipv4Addr> {
         let mut lock = self.address_pool.write().unwrap();
@@ -263,6 +268,12 @@ impl DhcpServer {
         }
         None
     }
+
+    // アドレスプールにアドレスを戻す。
+    fn push_address(&self, released_ip: Ipv4Addr) {
+        let mut lock = self.address_pool.write().unwrap();
+        lock.push(released_ip);
+}
 }
 
 fn main() {
@@ -425,12 +436,19 @@ fn dhcp_handler(
                     Some(server_id) => {
                         info!("{}: received DHCPREQUEST with server_id", transaction_id);
                         let server_ip = util::u8_to_ipv4addr(&server_id)?;
+
                         if server_ip != dhcp_server.server_address {
-                            // クライアントは別のDHCPサーバを選択。TODO: usedからエントリを削除。アドレスプールに返す
+                            // クライアントは別のDHCPサーバを選択。
                             info!("Client has chosen another dhcp server.");
+
+                            // 使用中テーブルとアドレスプールを戻す。
+                            if let Some(ip) = dhcp_server.pick_entry(client_macaddr) {
+                                dhcp_server.push_address(ip);
+                            }
+
+                            debug!("deleted from lease_entry");
                             return Ok(());
                         }
-                        let client_macaddr = packet.get_chaddr();
                         if let Some(ip_to_be_leased) = dhcp_server.get_entry(client_macaddr) {
                             let mut con = Connection::open("dhcp.db")?;
                             let tx = con.transaction()?;
@@ -525,13 +543,18 @@ fn dhcp_handler(
                 // IPを利用可能としてアドレスプールに戻す
                 // マップからエントリの削除。アドレスプールへの追加
                 info!("{}: received DHCPRELEASE", transaction_id);
-                return Ok(());
+                let mut con = Connection::open("dhcp.db")?; //TODO: コネクションの保持
+                let tx = con.transaction()?;
+                tx.execute(
+                    "DELETE FROM lease_entry WHERE mac_addr = ?",
+                    params![client_macaddr.to_string()],
+                )?;
+                tx.commit()?;
+                debug!("{}: deleted from DB", transaction_id);
+                // 使用中テーブルとアドレスプールを戻す。
+                if let Some(ip) = dhcp_server.pick_entry(client_macaddr) {
+                    dhcp_server.push_address(ip);
             }
-
-            DHCPDECLINE => {
-                // クライアントがARPした際に衝突していたらこれが届く。
-                // 利用不可能なIPとしてマークする。=> アドレスプールからの削除
-                info!("{}: received DHCPDECLINE", transaction_id);
                 return Ok(());
             }
 
