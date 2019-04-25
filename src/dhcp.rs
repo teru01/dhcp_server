@@ -161,18 +161,6 @@ impl<'a> DhcpPacket<'a> {
         *cursor += 4;
     }
 
-    // pub fn get_htype(&self) -> u8 {
-    //     self.buffer[1]
-    // }
-
-    // pub fn get_hlen(&self) -> u8 {
-    //     self.buffer[2]
-    // }
-
-    // pub fn get_hops(&self) -> u8 {
-    //     self.buffer[3]
-    // }
-
     //optionはcode, length, bufferの順に並んでいる
     pub fn get_option(&self, option_code: u8) -> Option<Vec<u8>> {
         let mut index: usize = 4; // 最初の4バイトはクッキー
