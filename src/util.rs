@@ -8,8 +8,7 @@ use pnet::packet::icmp::IcmpTypes;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::Packet;
 use pnet::transport::{
-    self, icmp_packet_iter, TransportChannelType, TransportProtocol::Ipv4, TransportReceiver,
-    TransportSender,
+    self, icmp_packet_iter, TransportChannelType, TransportProtocol::Ipv4
 };
 use pnet::util::checksum;
 

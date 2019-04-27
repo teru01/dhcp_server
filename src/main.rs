@@ -1,20 +1,9 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
-use std::sync::mpsc;
+use std::net::Ipv4Addr;
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::time::Duration;
-use std::{env, fs, io, net, ptr, str};
+use std::{env, fs, io, net, str};
 
-use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
-use pnet::packet::icmp::IcmpTypes;
-use pnet::packet::ip::IpNextHeaderProtocols;
-use pnet::packet::{Packet, PrimitiveValues};
-use pnet::transport::{
-    self, icmp_packet_iter, TransportChannelType, TransportProtocol::Ipv4, TransportReceiver,
-    TransportSender,
-};
-// use pnet::datalink::MacAddr;
 use pnet::util::MacAddr;
 
 use ipnetwork::Ipv4Network;
@@ -60,47 +49,8 @@ use dhcp::DhcpPacket;
 
 mod util;
 
-use rusqlite::NO_PARAMS;
-use rusqlite::{params, Connection, Rows};
+use rusqlite::Connection;
 mod database;
-
-#[test]
-fn test_init_address_pool() {
-    let mut used_ip = LeaseEntry::new();
-    used_ip.insert(
-        "f4:0f:24:27:aa:00".parse().unwrap(),
-        "192.168.111.3".parse().unwrap(),
-    );
-    used_ip.insert(
-        "f4:0f:24:27:ee:00".parse().unwrap(),
-        "192.168.111.23".parse().unwrap(),
-    );
-    used_ip.insert(
-        "f4:0f:24:27:db:00".parse().unwrap(),
-        "192.168.111.10".parse().unwrap(),
-    );
-    let mut env = HashMap::new();
-    env.insert("NETWORK_ADDR".to_string(), "192.168.111.0/24".to_string());
-    env.insert("DEFAULT_GATEWAY".to_string(), "192.168.111.1".to_string());
-    env.insert("SERVER_IDENTIFIER".to_string(), "192.168.111.2".to_string());
-    let v = match DhcpServer::init_address_pool(&used_ip, &env) {
-        Ok(v) => v,
-        Err(e) => {
-            println!("{:?}", e);
-            return;
-        }
-    };
-    assert_eq!(v.len(), 249);
-}
-
-#[test]
-fn test_dhcpserver_init() {
-    let dhcp_server = DhcpServer::new().unwrap();
-    let used_ip_table = dhcp_server.used_ipaddr_table.read().unwrap();
-    assert_eq!(used_ip_table.len(), 1);
-    let address_pool = dhcp_server.address_pool.read().unwrap();
-    assert_eq!(address_pool.len(), 256 - 4 - used_ip_table.len());
-}
 
 type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 
@@ -181,10 +131,11 @@ impl DhcpServer {
         used_ip_addrs.push(&network_addr);
         used_ip_addrs.push(&broadcast);
 
-        let addr_pool: Vec<_> = network_addr_with_prefix
-            .iter() //0〜255までイテレートする TODO rev()の実装
+        let mut addr_pool: Vec<Ipv4Addr> = network_addr_with_prefix
+            .iter()  // TODO rev()の実装
             .filter(|addr| !used_ip_addrs.contains(&addr))
             .collect();
+        addr_pool.reverse();
 
         return Ok(addr_pool);
     }
