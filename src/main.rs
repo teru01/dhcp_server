@@ -109,7 +109,7 @@ struct DhcpServer {
     address_pool: RwLock<Vec<Ipv4Addr>>,   //利用可能なアドレス。降順に並ぶ。
     server_address: Ipv4Network,
     default_gateway: Ipv4Addr,
-    subnet_mask: Ipv4Addr
+    subnet_mask: Ipv4Addr,
 }
 
 impl DhcpServer {
@@ -127,7 +127,10 @@ impl DhcpServer {
             addr_pool.len()
         );
 
-        let network_addr: Ipv4Network = env.get("NETWORK_ADDR").expect("Missing network_addr").parse()?;
+        let network_addr: Ipv4Network = env
+            .get("NETWORK_ADDR")
+            .expect("Missing network_addr")
+            .parse()?;
         let subnet_mask = network_addr.mask();
 
         return Ok(DhcpServer {
@@ -141,7 +144,7 @@ impl DhcpServer {
                 .get("DEFAULT_GATEWAY")
                 .expect("Missing default_gateway")
                 .parse()?,
-            subnet_mask: subnet_mask
+            subnet_mask: subnet_mask,
         });
     }
 
@@ -437,25 +440,16 @@ fn dhcp_handler(
                             let tx = con.transaction()?;
                             // macaddrがすでに存在する場合がある。（起動後DBに保存されていたもの、または途中でrequest_ipを変更する
                             let count = database::count_records_by_mac_addr(&tx, &client_macaddr)?;
-                            if count == 0 {
+                            match count {
                                 // レコードがないならinsert
-                                tx.execute(
-                                    "INSERT INTO lease_entry (mac_addr, ip_addr) VALUES (?1, ?2)",
-                                    params![
-                                        client_macaddr.to_string(),
-                                        ip_to_be_leased.to_string()
-                                    ],
-                                )?;
-                            } else {
-                                tx.execute(
-                                    "UPDATE lease_entry SET ip_addr = ?1 WHERE mac_addr = ?2",
-                                    params![
-                                        ip_to_be_leased.to_string(),
-                                        client_macaddr.to_string()
-                                    ],
-                                )?;
+                                0 => {
+                                    database::insert_entry(&tx, &client_macaddr, &ip_to_be_leased)?
+                                }
+                                // レコードがあるならupdate
+                                _ => {
+                                    database::update_entry(&tx, &client_macaddr, &ip_to_be_leased)?
+                                }
                             }
-
                             // ACKを返して、DBにマップをコミット
                             let dhcp_packet = make_dhcp_packet(
                                 &packet,
@@ -519,11 +513,9 @@ fn dhcp_handler(
                 info!("{}: received DHCPRELEASE", transaction_id);
                 let mut con = Connection::open("dhcp.db")?; //TODO: コネクションの保持
                 let tx = con.transaction()?;
-                tx.execute(
-                    "DELETE FROM lease_entry WHERE mac_addr = ?",
-                    params![client_macaddr.to_string()],
-                )?;
+                database::delete_entry(&tx, &client_macaddr)?;
                 tx.commit()?;
+
                 debug!("{}: deleted from DB", transaction_id);
                 // 使用中テーブルとアドレスプールを戻す。
                 if let Some(ip) = dhcp_server.pick_entry(client_macaddr) {

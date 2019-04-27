@@ -6,6 +6,9 @@ use std::collections::HashMap;
 
 type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 
+/**
+ * 全てのリースの一覧を返す
+ */
 pub fn get_all_entries(con: &Connection) -> Result<LeaseEntry, rusqlite::Error> {
     let mut mac_ip_map = LeaseEntry::new();
 
@@ -33,6 +36,9 @@ pub fn get_all_entries(con: &Connection) -> Result<LeaseEntry, rusqlite::Error> 
     return Ok(mac_ip_map);
 }
 
+/**
+ * 指定のMACアドレスをもつレコードの件数を返す
+ */
 pub fn count_records_by_mac_addr(tx: &Transaction, mac_addr: &MacAddr) -> Result<u8, rusqlite::Error> {
     let mut stmnt = tx
         .prepare("SELECT COUNT (*) FROM lease_entry WHERE mac_addr = ?")?;
@@ -47,4 +53,45 @@ pub fn count_records_by_mac_addr(tx: &Transaction, mac_addr: &MacAddr) -> Result
         }
     };
     return Ok(count);
+}
+
+/**
+ * リースエントリの追加
+ */
+pub fn insert_entry(tx: &Transaction, mac_addr: &MacAddr, ip_addr: &Ipv4Addr) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "INSERT INTO lease_entry (mac_addr, ip_addr) VALUES (?1, ?2)",
+        params![
+            mac_addr.to_string(),
+            ip_addr.to_string()
+        ],
+    )?;
+    return Ok(());
+}
+
+/**
+ * リースエントリの更新
+ */
+pub fn update_entry(tx: &Transaction, mac_addr: &MacAddr, ip_addr: &Ipv4Addr) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "UPDATE lease_entry SET ip_addr = ?2 WHERE mac_addr = ?1",
+        params![
+            mac_addr.to_string(),
+            ip_addr.to_string()
+        ],
+    )?;
+    return Ok(());
+}
+
+/**
+ * リースエントリの削除
+ */
+pub fn delete_entry(tx: &Transaction, mac_addr: &MacAddr) -> Result<(), rusqlite::Error> {
+    tx.execute(
+        "DELETE FROM lease_entry WHERE mac_addr = ?",
+        params![
+            mac_addr.to_string(),
+        ],
+    )?;
+    return Ok(());
 }
