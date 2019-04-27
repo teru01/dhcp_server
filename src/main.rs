@@ -29,11 +29,6 @@ extern crate log;
 use env_logger;
 use log::{debug, error, info, warn};
 
-extern crate rusqlite;
-
-use rusqlite::NO_PARAMS;
-use rusqlite::{params, Connection, Rows};
-
 const HTYPE_ETHER: u8 = 1;
 const HLEN_MACADDR: u8 = 6;
 
@@ -64,6 +59,11 @@ mod dhcp;
 use dhcp::DhcpPacket;
 
 mod util;
+
+extern crate rusqlite;
+use rusqlite::NO_PARAMS;
+use rusqlite::{params, Connection, Rows};
+mod database;
 
 #[test]
 fn test_init_address_pool() {
@@ -180,7 +180,7 @@ impl DhcpServer {
         used_ip_addrs.push(&broadcast);
 
         let addr_pool: Vec<_> = network_addr_with_prefix
-            .iter() //0〜255までイテレートする
+            .iter() //0〜255までイテレートする TODO rev()の実装
             .filter(|addr| !used_ip_addrs.contains(&addr))
             .collect();
 
@@ -189,31 +189,15 @@ impl DhcpServer {
 
     // DBから使用中のIP情報を取得する
     fn init_used_ipaddr_table() -> Result<LeaseEntry, failure::Error> {
-        let mut used_ip_map = LeaseEntry::new();
-
         let con = Connection::open("dhcp.db")?;
-        let mut statement = con.prepare("SELECT mac_addr, ip_addr FROM lease_entry")?;
-        let mut entries: Rows = statement.query(NO_PARAMS)?;
-        while let Some(entry) = entries.next()? {
-            let mac_addr: MacAddr = match entry.get(0) {
-                Ok(mac) => {
-                    let mac_string: String = mac;
-                    mac_string.parse().unwrap()
-                }
-                Err(_) => continue,
-            };
-
-            let ip_addr = match entry.get(1) {
-                Ok(ip) => {
-                    let ip_string: String = ip;
-                    ip_string.parse().unwrap()
-                }
-                Err(_) => continue,
-            };
-
-            used_ip_map.insert(mac_addr, ip_addr);
-        }
-        Ok(used_ip_map)
+        let entries = match database::get_all_entries(&con) {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!("{:?}", e);
+                return Err(failure::err_msg("Database Error"));
+            }
+        };
+        return Ok(entries);
     }
 
     // 環境情報を読んでハッシュマップを返す
@@ -391,7 +375,7 @@ fn dhcp_handler(
     if let Some(message) = packet.get_option(Code::MessageType as u8) {
         let message_type = message[0];
         let mut packet_buffer = [0u8; DHCP_SIZE];
-        let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap(); //TODO: ブロードキャストをユニキャストに
+        let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap();
         let transaction_id = BigEndian::read_u32(packet.get_xid());
         let client_macaddr = packet.get_chaddr();
 
