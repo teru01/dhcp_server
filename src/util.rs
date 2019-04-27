@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, AddrParseError};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -11,6 +11,8 @@ use pnet::transport::{
     self, icmp_packet_iter, TransportChannelType, TransportProtocol::Ipv4
 };
 use pnet::util::checksum;
+use std::collections::HashMap;
+use std::fs;
 
 
 #[test]
@@ -87,4 +89,53 @@ pub fn u8_to_ipv4addr(buf: &[u8]) -> Result<Ipv4Addr, failure::Error> {
     } else {
         return Err(failure::err_msg("Could not get ip addr."));
     }
+}
+
+// 環境情報を読んでハッシュマップを返す
+pub fn load_env() -> HashMap<String, String> {
+    let contents = fs::read_to_string(".env").expect("Failed to read env file");
+    let lines: Vec<_> = contents.split('\n').collect();
+    let mut map = HashMap::new();
+    for line in lines {
+        let elm: Vec<_> = line.split('=').map(str::trim).collect();
+        if elm.len() == 2 {
+            map.insert(elm[0].to_string(), elm[1].to_string());
+        }
+    }
+    return map;
+}
+
+pub fn obtain_static_addresses(env: &HashMap<String, String>) -> Result<HashMap<String, Ipv4Addr>, AddrParseError> {
+    let network_addr: Ipv4Addr = env
+        .get("NETWORK_ADDR")
+        .expect("Missing network_addr")
+        .parse()?;
+
+    let subnet_mask = env
+        .get("SUBNET_MASK")
+        .expect("Missing subnet_mask")
+        .parse()?;
+
+    let dhcp_server_address = env
+        .get("SERVER_IDENTIFIER")
+        .expect("Missing server_identifier")
+        .parse()?;
+
+    let default_gateway = env
+        .get("DEFAULT_GATEWAY")
+        .expect("Missing default_gateway")
+        .parse()?;
+
+    let dns_addr = env
+        .get("DNS_SERVER")
+        .expect("Missing dns_server")
+        .parse()?;
+
+    let mut map = HashMap::new();
+    map.insert("network_addr".to_string(), network_addr);
+    map.insert("subnet_mask".to_string(), subnet_mask);
+    map.insert("dhcp_server_addr".to_string(), dhcp_server_address);
+    map.insert("default_gateway".to_string(), default_gateway);
+    map.insert("dns_addr".to_string(), dns_addr);
+    return Ok(map);
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, RwLock};
 use std::thread;
-use std::{env, fs, io, net, str};
+use std::{env, io, net};
 
 use pnet::util::MacAddr;
 
@@ -57,78 +57,62 @@ type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 struct DhcpServer {
     used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
     address_pool: RwLock<Vec<Ipv4Addr>>,   //利用可能なアドレス。降順に並ぶ。
-    server_address: Ipv4Network,
+    server_address: Ipv4Addr,
     default_gateway: Ipv4Addr,
     subnet_mask: Ipv4Addr,
+    dns_server: Ipv4Addr
 }
 
 impl DhcpServer {
     fn new() -> Result<DhcpServer, failure::Error> {
         // envから設定情報の読み込み
         // アドレスプールの設定、使用中マップの
-        let env = Self::load_env();
+        let env = util::load_env();
+
+        // DNSやゲートウェイなどのアドレス
+        let static_addresses = util::obtain_static_addresses(&env)?;
 
         let used_ipaddr_table = Self::init_used_ipaddr_table()?;
         info!("There are {} leased entries", used_ipaddr_table.len());
 
-        let addr_pool = Self::init_address_pool(&used_ipaddr_table, &env)?;
+        let addr_pool = Self::init_address_pool(&used_ipaddr_table, &static_addresses)?;
         info!(
             "There are {} addresses in the address pool",
             addr_pool.len()
         );
 
-        let network_addr: Ipv4Network = env
-            .get("NETWORK_ADDR")
-            .expect("Missing network_addr")
-            .parse()?;
-        let subnet_mask = network_addr.mask();
-
         return Ok(DhcpServer {
             used_ipaddr_table: RwLock::new(used_ipaddr_table),
             address_pool: RwLock::new(addr_pool),
-            server_address: env
-                .get("SERVER_IDENTIFIER")
-                .expect("Missing server_identifier")
-                .parse()?,
-            default_gateway: env
-                .get("DEFAULT_GATEWAY")
-                .expect("Missing default_gateway")
-                .parse()?,
-            subnet_mask: subnet_mask,
+            server_address: *static_addresses.get("dhcp_server_addr").unwrap(),
+            default_gateway: *static_addresses.get("default_gateway").unwrap(),
+            subnet_mask: *static_addresses.get("subnet_mask").unwrap(),
+            dns_server: *static_addresses.get("dns_addr").unwrap()
         });
     }
 
     // 新たなホストに割り当て可能なアドレスプールを初期化
-    // ネットワーク中のアドレスからデフォルトゲートウェイ、DHCPサーバ自身、
+    // ネットワーク中のアドレスからデフォルトゲートウェイ、DNSサーバ、DHCPサーバ自身、
     // ブロードキャストアドレス、ネットワークアドレス、すでに割り当て済みのIPアドレスを除く
     fn init_address_pool(
         used_ipaddr_table: &LeaseEntry,
-        env: &HashMap<String, String>,
+        static_addresses: &HashMap<String, Ipv4Addr>,
     ) -> Result<Vec<Ipv4Addr>, failure::Error> {
-        let network_addr_with_prefix: Ipv4Network = env
-            .get("NETWORK_ADDR")
-            .expect("Missing NETWORK_ADDR")
-            .parse()?;
-
-        let default_gateway = env
-            .get("DEFAULT_GATEWAY")
-            .expect("Missing DEFAULT_GATEWAY")
-            .parse()?;
-
-        let dhcp_server_addr = env
-            .get("SERVER_IDENTIFIER")
-            .expect("Missing SERVER_IDENTIFIER")
-            .parse()?;
-
-        let network_addr = network_addr_with_prefix.network();
+        let network_addr = static_addresses.get("network_addr").unwrap();
+        let prefix = ipnetwork::ipv4_mask_to_prefix(*static_addresses.get("subnet_mask").unwrap())?;
+        let network_addr_with_prefix = Ipv4Network::new(*network_addr, prefix)?;
+        let default_gateway = static_addresses.get("default_gateway").unwrap();
+        let dhcp_server_addr = static_addresses.get("dhcp_server_addr").unwrap();
+        let dns_server_addr = static_addresses.get("dns_addr").unwrap();
         let broadcast = network_addr_with_prefix.broadcast();
 
         // すでに使用されているアドレス。
         let mut used_ip_addrs: Vec<&Ipv4Addr> = used_ipaddr_table.values().collect();
 
-        used_ip_addrs.push(&default_gateway);
-        used_ip_addrs.push(&dhcp_server_addr);
-        used_ip_addrs.push(&network_addr);
+        used_ip_addrs.push(network_addr);
+        used_ip_addrs.push(default_gateway);
+        used_ip_addrs.push(dhcp_server_addr);
+        used_ip_addrs.push(dns_server_addr);
         used_ip_addrs.push(&broadcast);
 
         let mut addr_pool: Vec<Ipv4Addr> = network_addr_with_prefix
@@ -151,20 +135,6 @@ impl DhcpServer {
             }
         };
         return Ok(entries);
-    }
-
-    // 環境情報を読んでハッシュマップを返す
-    fn load_env() -> HashMap<String, String> {
-        let contents = fs::read_to_string(".env").expect("Failed to read env file");
-        let lines: Vec<_> = contents.split('\n').collect();
-        let mut map = HashMap::new();
-        for line in lines {
-            let elm: Vec<_> = line.split('=').map(str::trim).collect();
-            if elm.len() == 2 {
-                map.insert(elm[0].to_string(), elm[1].to_string());
-            }
-        }
-        return map;
     }
 
     fn insert_entry(&self, key: MacAddr, value: Ipv4Addr) {
@@ -374,7 +344,7 @@ fn dhcp_handler(
                         info!("{}: received DHCPREQUEST with server_id", transaction_id);
                         let server_ip = util::u8_to_ipv4addr(&server_id)?;
 
-                        if server_ip != dhcp_server.server_address.ip() {
+                        if server_ip != dhcp_server.server_address {
                             // クライアントは別のDHCPサーバを選択。
                             info!("Client has chosen another dhcp server.");
 
@@ -526,7 +496,7 @@ fn make_dhcp_packet<'a>(
         &mut cursor,
         Code::ServerIdentifier as u8,
         4,
-        Some(&dhcp_server.server_address.ip().octets()),
+        Some(&dhcp_server.server_address.octets()),
     );
     dhcp_packet.set_option(
         &mut cursor,
@@ -544,7 +514,7 @@ fn make_dhcp_packet<'a>(
         &mut cursor,
         Code::DNS as u8,
         4,
-        Some(&dhcp_server.default_gateway.octets()),
+        Some(&dhcp_server.dns_server.octets()), // TODO DNS
     );
 
     dhcp_packet.set_option(&mut cursor, Code::End as u8, 0, None);
