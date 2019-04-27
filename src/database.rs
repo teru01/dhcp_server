@@ -1,7 +1,8 @@
-use rusqlite::{Connection, NO_PARAMS};
+use rusqlite::{Connection, NO_PARAMS, params, Transaction};
 use std::net::Ipv4Addr;
 use pnet::util::MacAddr;
 use std::collections::HashMap;
+
 
 type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 
@@ -30,4 +31,20 @@ pub fn get_all_entries(con: &Connection) -> Result<LeaseEntry, rusqlite::Error> 
         mac_ip_map.insert(mac_addr, ip_addr);
     }
     return Ok(mac_ip_map);
+}
+
+pub fn count_records_by_mac_addr(tx: &Transaction, mac_addr: &MacAddr) -> Result<u8, rusqlite::Error> {
+    let mut stmnt = tx
+        .prepare("SELECT COUNT (*) FROM lease_entry WHERE mac_addr = ?")?;
+    let mut count_result =
+        stmnt.query(params![mac_addr.to_string()])?;
+
+    let count: u8 = match count_result.next()? {
+        Some(row) => row.get(0)?,
+        None => {
+            // 1行も結果がなかった場合（countの結果なので基本的に起こりえない）
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+    };
+    return Ok(count);
 }

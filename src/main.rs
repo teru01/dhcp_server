@@ -60,7 +60,6 @@ use dhcp::DhcpPacket;
 
 mod util;
 
-extern crate rusqlite;
 use rusqlite::NO_PARAMS;
 use rusqlite::{params, Connection, Rows};
 mod database;
@@ -437,20 +436,7 @@ fn dhcp_handler(
                             let mut con = Connection::open("dhcp.db")?;
                             let tx = con.transaction()?;
                             // macaddrがすでに存在する場合がある。（起動後DBに保存されていたもの、または途中でrequest_ipを変更する
-                            let count: i32 = {
-                                let mut stmnt = tx
-                                    .prepare("SELECT COUNT (*) FROM lease_entry WHERE mac_addr = ?")
-                                    .unwrap();
-                                let mut count_result =
-                                    stmnt.query(params![client_macaddr.to_string()]).unwrap();
-
-                                match count_result.next()? {
-                                    Some(row) => row.get(0)?,
-                                    None => {
-                                        return Err(failure::err_msg("Failed to count rows"));
-                                    }
-                                }
-                            };
+                            let count = database::count_records_by_mac_addr(&tx, &client_macaddr)?;
                             if count == 0 {
                                 // レコードがないならinsert
                                 tx.execute(
