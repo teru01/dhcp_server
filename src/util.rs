@@ -80,11 +80,11 @@ pub fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::E
     }
 }
 
-pub fn u8_to_ipv4addr(buf: &[u8]) -> Result<Ipv4Addr, failure::Error> {
+pub fn u8_to_ipv4addr(buf: &[u8]) -> Option<Ipv4Addr> {
     if buf.len() == 4 {
-        return Ok(Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]));
+        return Some(Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]));
     } else {
-        return Err(failure::err_msg("Could not get ip addr."));
+        return None;
     }
 }
 

@@ -101,12 +101,9 @@ fn dhcp_handler(
     dhcp_server: Arc<DhcpServer>,
 ) -> Result<(), failure::Error> {
     // DHCPのヘッダ読み取り
-    let message = match packet.get_option(Code::MessageType as u8) {
-        Some(m) => m,
-        None => {
-            return Err(failure::err_msg("specified option was not found"));
-        }
-    };
+    let message = packet
+        .get_option(Code::MessageType as u8)
+        .ok_or(failure::err_msg("specified option was not found"))?;
     let message_type = message[0];
     let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap();
     let transaction_id = BigEndian::read_u32(packet.get_xid());
@@ -141,7 +138,9 @@ fn dhcp_handler(
                     // サーバが返したOFFERに対する返答を処理する。
 
                     info!("{:x}: received DHCPREQUEST with server_id", transaction_id);
-                    let server_ip = util::u8_to_ipv4addr(&server_id)?;
+
+                    let server_ip = util::u8_to_ipv4addr(&server_id)
+                        .ok_or(failure::err_msg("Failed to convert ip addr."))?;
 
                     if server_ip != dhcp_server.server_address {
                         // クライアントが別のDHCPサーバを選択した場合。
@@ -213,7 +212,7 @@ fn dhcp_handler(
                     soc.send_to(dhcp_packet.get_buffer(), dest)?;
                     info!("{:x}: sent DHCPACK", transaction_id);
                     return Ok(());
-                },
+                }
             }
         }
 
@@ -242,30 +241,35 @@ fn dhcp_handler(
         _ => {
             // 未実装のメッセージを受信した場合。
 
-            let msg = format!("{:x}: received unimplemented message, message_type:{}",
-                transaction_id, message_type);
+            let msg = format!(
+                "{:x}: received unimplemented message, message_type:{}",
+                transaction_id, message_type
+            );
             return Err(failure::err_msg(msg));
         }
     }
 }
 
-// オプションからリクエストされたIPアドレスがあり、利用可能ならばそれを返す。
+/**
+ * オプションにrequested ip addressがあり、利用可能ならばそれを返す。
+ */
 fn obtain_available_ip_from_requested_option(
     dhcp_server: Arc<DhcpServer>,
     received_packet: &DhcpPacket,
-) -> Result<Ipv4Addr, failure::Error> {
-    if let Some(ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
-        let requested_ip = util::u8_to_ipv4addr(&ip)?;
-        // アドレスプールからの検索
-        if let Some(ip_from_pool) = dhcp_server.pick_specified_ip(&requested_ip) {
-            let used = util::is_ipaddr_already_in_use(&ip_from_pool)?;
-            if !used {
-                return Ok(requested_ip);
-            }
+) -> Option<Ipv4Addr> {
+    let ip = received_packet.get_option(Code::RequestedIpAddress as u8)?;
+    let requested_ip = util::u8_to_ipv4addr(&ip)?;
+    // アドレスプールからの検索
+    let ip_from_pool = dhcp_server.pick_specified_ip(&requested_ip)?;
+
+    // すでに使われているかチェック
+    if let Ok(used) = util::is_ipaddr_already_in_use(&ip_from_pool) {
+        if !used {
+            // 使われていなければそれを返す
+            return Some(requested_ip);
         }
     }
-    // 本当はエラーじゃないのでエラーにするのは如何なものか。
-    return Err(failure::err_msg("not specify requested ip address"));
+    return None;
 }
 
 // 利用可能なIPアドレスを探す。
@@ -277,7 +281,7 @@ fn select_lease_ip(
     received_packet: &DhcpPacket,
 ) -> Result<Ipv4Addr, failure::Error> {
     // Requested Ip Addrオプションからの取得
-    if let Ok(ip_to_be_leased) =
+    if let Some(ip_to_be_leased) =
         obtain_available_ip_from_requested_option(dhcp_server.clone(), &received_packet)
     {
         dhcp_server.insert_entry(received_packet.get_chaddr(), ip_to_be_leased);
