@@ -1,5 +1,5 @@
-use std::ptr;
 use std::net::Ipv4Addr;
+use std::ptr;
 
 use pnet::datalink::MacAddr;
 use pnet::packet::PrimitiveValues;

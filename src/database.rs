@@ -1,8 +1,7 @@
-use rusqlite::{Connection, NO_PARAMS, params, Transaction};
-use std::net::Ipv4Addr;
 use pnet::util::MacAddr;
+use rusqlite::{params, Connection, Transaction, NO_PARAMS};
 use std::collections::HashMap;
-
+use std::net::Ipv4Addr;
 
 type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 
@@ -39,11 +38,12 @@ pub fn get_all_entries(con: &Connection) -> Result<LeaseEntry, rusqlite::Error> 
 /**
  * 指定のMACアドレスをもつレコードの件数を返す
  */
-pub fn count_records_by_mac_addr(tx: &Transaction, mac_addr: &MacAddr) -> Result<u8, rusqlite::Error> {
-    let mut stmnt = tx
-        .prepare("SELECT COUNT (*) FROM lease_entry WHERE mac_addr = ?")?;
-    let mut count_result =
-        stmnt.query(params![mac_addr.to_string()])?;
+pub fn count_records_by_mac_addr(
+    tx: &Transaction,
+    mac_addr: &MacAddr,
+) -> Result<u8, rusqlite::Error> {
+    let mut stmnt = tx.prepare("SELECT COUNT (*) FROM lease_entry WHERE mac_addr = ?")?;
+    let mut count_result = stmnt.query(params![mac_addr.to_string()])?;
 
     let count: u8 = match count_result.next()? {
         Some(row) => row.get(0)?,
@@ -58,13 +58,14 @@ pub fn count_records_by_mac_addr(tx: &Transaction, mac_addr: &MacAddr) -> Result
 /**
  * リースエントリの追加
  */
-pub fn insert_entry(tx: &Transaction, mac_addr: &MacAddr, ip_addr: &Ipv4Addr) -> Result<(), rusqlite::Error> {
+pub fn insert_entry(
+    tx: &Transaction,
+    mac_addr: &MacAddr,
+    ip_addr: &Ipv4Addr,
+) -> Result<(), rusqlite::Error> {
     tx.execute(
         "INSERT INTO lease_entry (mac_addr, ip_addr) VALUES (?1, ?2)",
-        params![
-            mac_addr.to_string(),
-            ip_addr.to_string()
-        ],
+        params![mac_addr.to_string(), ip_addr.to_string()],
     )?;
     return Ok(());
 }
@@ -72,13 +73,14 @@ pub fn insert_entry(tx: &Transaction, mac_addr: &MacAddr, ip_addr: &Ipv4Addr) ->
 /**
  * リースエントリの更新
  */
-pub fn update_entry(tx: &Transaction, mac_addr: &MacAddr, ip_addr: &Ipv4Addr) -> Result<(), rusqlite::Error> {
+pub fn update_entry(
+    tx: &Transaction,
+    mac_addr: &MacAddr,
+    ip_addr: &Ipv4Addr,
+) -> Result<(), rusqlite::Error> {
     tx.execute(
         "UPDATE lease_entry SET ip_addr = ?2 WHERE mac_addr = ?1",
-        params![
-            mac_addr.to_string(),
-            ip_addr.to_string()
-        ],
+        params![mac_addr.to_string(), ip_addr.to_string()],
     )?;
     return Ok(());
 }
@@ -89,9 +91,7 @@ pub fn update_entry(tx: &Transaction, mac_addr: &MacAddr, ip_addr: &Ipv4Addr) ->
 pub fn delete_entry(tx: &Transaction, mac_addr: &MacAddr) -> Result<(), rusqlite::Error> {
     tx.execute(
         "DELETE FROM lease_entry WHERE mac_addr = ?",
-        params![
-            mac_addr.to_string(),
-        ],
+        params![mac_addr.to_string(),],
     )?;
     return Ok(());
 }

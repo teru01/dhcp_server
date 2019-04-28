@@ -60,7 +60,8 @@ struct DhcpServer {
     server_address: Ipv4Addr,
     default_gateway: Ipv4Addr,
     subnet_mask: Ipv4Addr,
-    dns_server: Ipv4Addr
+    dns_server: Ipv4Addr,
+    lease_time: Vec<u8>,
 }
 
 impl DhcpServer {
@@ -81,13 +82,21 @@ impl DhcpServer {
             addr_pool.len()
         );
 
+        let lease_v = util::make_vec_from_u32(
+            env.get("LEASE_TIME")
+                .expect("Missing lease_time")
+                .parse()
+                .unwrap(),
+        )?;
+
         return Ok(DhcpServer {
             used_ipaddr_table: RwLock::new(used_ipaddr_table),
             address_pool: RwLock::new(addr_pool),
             server_address: *static_addresses.get("dhcp_server_addr").unwrap(),
             default_gateway: *static_addresses.get("default_gateway").unwrap(),
             subnet_mask: *static_addresses.get("subnet_mask").unwrap(),
-            dns_server: *static_addresses.get("dns_addr").unwrap()
+            dns_server: *static_addresses.get("dns_addr").unwrap(),
+            lease_time: lease_v,
         });
     }
 
@@ -116,7 +125,7 @@ impl DhcpServer {
         used_ip_addrs.push(&broadcast);
 
         let mut addr_pool: Vec<Ipv4Addr> = network_addr_with_prefix
-            .iter()  // TODO rev()の実装
+            .iter() // TODO rev()の実装
             .filter(|addr| !used_ip_addrs.contains(&addr))
             .collect();
         addr_pool.reverse();
@@ -490,8 +499,8 @@ fn make_dhcp_packet<'a>(
         &mut cursor,
         Code::IPAddressLeaseTime as u8,
         4,
-        Some(&vec![0, 0, 1, 0]),
-    ); //TODO: リースタイム変更
+        Some(&dhcp_server.lease_time),
+    );
     dhcp_packet.set_option(
         &mut cursor,
         Code::ServerIdentifier as u8,
