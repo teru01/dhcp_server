@@ -176,7 +176,7 @@ impl<'a> DhcpPacket<'a> {
             } else {
                 index += 1; // on the 'len' field
                 let len = options[index];
-                index += 1; // on the first byte of value.
+                index += 1; // on the first byte of the value.
                 index += len as usize;
             }
         }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::{env, io, net};
 
@@ -57,6 +57,7 @@ type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
 struct DhcpServer {
     used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
     address_pool: RwLock<Vec<Ipv4Addr>>,   //利用可能なアドレス。降順に並ぶ。
+    db_connection: Mutex<Connection>, // ConnectionはSyncを実装しないのでRwLockではだめ。
     server_address: Ipv4Addr,
     default_gateway: Ipv4Addr,
     subnet_mask: Ipv4Addr,
@@ -73,7 +74,9 @@ impl DhcpServer {
         // DNSやゲートウェイなどのアドレス
         let static_addresses = util::obtain_static_addresses(&env)?;
 
-        let used_ipaddr_table = Self::init_used_ipaddr_table()?;
+        let con = Connection::open("dhcp.db")?;
+
+        let used_ipaddr_table = Self::init_used_ipaddr_table(&con)?;
         info!("There are {} leased entries", used_ipaddr_table.len());
 
         let addr_pool = Self::init_address_pool(&used_ipaddr_table, &static_addresses)?;
@@ -92,6 +95,7 @@ impl DhcpServer {
         return Ok(DhcpServer {
             used_ipaddr_table: RwLock::new(used_ipaddr_table),
             address_pool: RwLock::new(addr_pool),
+            db_connection: Mutex::new(con),
             server_address: *static_addresses.get("dhcp_server_addr").unwrap(),
             default_gateway: *static_addresses.get("default_gateway").unwrap(),
             subnet_mask: *static_addresses.get("subnet_mask").unwrap(),
@@ -134,8 +138,7 @@ impl DhcpServer {
     }
 
     // DBから使用中のIP情報を取得する
-    fn init_used_ipaddr_table() -> Result<LeaseEntry, failure::Error> {
-        let con = Connection::open("dhcp.db")?;
+    fn init_used_ipaddr_table(con: &Connection) -> Result<LeaseEntry, failure::Error> {
         let entries = match database::get_all_entries(&con) {
             Ok(rows) => rows,
             Err(e) => {
@@ -366,7 +369,7 @@ fn dhcp_handler(
                             return Ok(());
                         }
                         if let Some(ip_to_be_leased) = dhcp_server.get_entry(client_macaddr) {
-                            let mut con = Connection::open("dhcp.db")?;
+                            let mut con = dhcp_server.db_connection.lock().unwrap();
                             let tx = con.transaction()?;
                             // macaddrがすでに存在する場合がある。（起動後DBに保存されていたもの、または途中でrequest_ipを変更する
                             let count = database::count_records_by_mac_addr(&tx, &client_macaddr)?;
@@ -393,6 +396,9 @@ fn dhcp_handler(
 
                             // パケット送信で失敗すればこれは実行されずにロールバックされる。=> DBの整合性は保たれる
                             tx.commit()?;
+                            // ガードの破棄
+                            drop(con);
+
                             debug!("{}: leased address: {}", transaction_id, ip_to_be_leased);
                             if count == 0 {
                                 debug!("{}: inserted into DB", transaction_id);
@@ -441,10 +447,11 @@ fn dhcp_handler(
                 // IPを利用可能としてアドレスプールに戻す
                 // マップからエントリの削除。アドレスプールへの追加
                 info!("{}: received DHCPRELEASE", transaction_id);
-                let mut con = Connection::open("dhcp.db")?; //TODO: コネクションの保持
+                let mut con = dhcp_server.db_connection.lock().unwrap();
                 let tx = con.transaction()?;
                 database::delete_entry(&tx, &client_macaddr)?;
                 tx.commit()?;
+                drop(con);
 
                 debug!("{}: deleted from DB", transaction_id);
                 // 使用中テーブルとアドレスプールを戻す。
