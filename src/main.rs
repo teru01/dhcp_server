@@ -72,7 +72,7 @@ fn main() {
                 let cloned_dhcp_server = dhcp_server.clone();
 
                 thread::spawn(move || {
-                    if let Some(dhcp_packet) = DhcpPacket::new(&mut recv_buf[..size]) {
+                    if let Some(dhcp_packet) = DhcpPacket::new(Box::new(recv_buf)) {
                         if dhcp_packet.get_op() != BOOTREQUEST {
                             return;
                         }
@@ -160,7 +160,6 @@ fn dhcp_handler(
     // dhcpのヘッダ読み取り
     if let Some(message) = packet.get_option(Code::MessageType as u8) {
         let message_type = message[0];
-        let mut packet_buffer = [0u8; DHCP_SIZE];
         let dest: net::SocketAddr = "255.255.255.255:68".parse().unwrap();
         let transaction_id = BigEndian::read_u32(packet.get_xid());
         let client_macaddr = packet.get_chaddr();
@@ -175,24 +174,13 @@ fn dhcp_handler(
 
                 // DBアクセス。以前リースしたやつがあればそれを再び渡す
                 // IPアドレスの決定
-                let ip_to_be_leased = match select_lease_ip(dhcp_server.clone(), &packet) {
-                    Ok(ip) => ip,
-                    Err(e) => {
-                        // 利用できるIPが見つからないので強制終了。
-                        panic!("{}", e);
-                    }
-                };
+                let ip_to_be_leased = select_lease_ip(dhcp_server.clone(), &packet)?;
 
                 // NoneならACKではinsert, SomeならACKではupdate（すでにDBにエントリがある）
                 dhcp_server.insert_entry(client_macaddr, ip_to_be_leased);
 
-                let dhcp_packet = make_dhcp_packet(
-                    &packet,
-                    &dhcp_server,
-                    DHCPOFFER,
-                    &mut packet_buffer,
-                    &ip_to_be_leased,
-                )?;
+                let dhcp_packet =
+                    make_dhcp_packet(&packet, &dhcp_server, DHCPOFFER, &ip_to_be_leased)?;
                 soc.send_to(dhcp_packet.get_buffer(), dest)?;
 
                 info!("{}: sent DHCPOFFER", transaction_id);
@@ -216,7 +204,7 @@ fn dhcp_handler(
                                 dhcp_server.push_address(ip);
                             }
 
-                            debug!("deleted from lease_entry");
+                            debug!("deleted from lease_entries");
                             return Ok(());
                         }
                         if let Some(ip_to_be_leased) = dhcp_server.get_entry(client_macaddr) {
@@ -235,13 +223,8 @@ fn dhcp_handler(
                                 }
                             }
                             // ACKを返して、DBにマップをコミット
-                            let dhcp_packet = make_dhcp_packet(
-                                &packet,
-                                &dhcp_server,
-                                DHCPACK,
-                                &mut packet_buffer,
-                                &ip_to_be_leased,
-                            )?;
+                            let dhcp_packet =
+                                make_dhcp_packet(&packet, &dhcp_server, DHCPACK, &ip_to_be_leased)?;
                             soc.send_to(dhcp_packet.get_buffer(), dest)?;
                             info!("{}: sent DHCPACK", transaction_id);
 
@@ -267,25 +250,15 @@ fn dhcp_handler(
                             let prev_ip = packet.get_ciaddr();
                             if prev_ip != ip_to_be_leased {
                                 // NAKを返す
-                                let dhcp_packet = make_dhcp_packet(
-                                    &packet,
-                                    &dhcp_server,
-                                    DHCPNAK,
-                                    &mut packet_buffer,
-                                    &prev_ip,
-                                )?;
+                                let dhcp_packet =
+                                    make_dhcp_packet(&packet, &dhcp_server, DHCPNAK, &prev_ip)?;
                                 soc.send_to(dhcp_packet.get_buffer(), dest)?;
                                 info!("{}: sent DHCPNAK", transaction_id);
                                 return Ok(());
                             }
                             // ACKを返す。
-                            let dhcp_packet = make_dhcp_packet(
-                                &packet,
-                                &dhcp_server,
-                                DHCPACK,
-                                &mut packet_buffer,
-                                &ip_to_be_leased,
-                            )?;
+                            let dhcp_packet =
+                                make_dhcp_packet(&packet, &dhcp_server, DHCPACK, &ip_to_be_leased)?;
                             soc.send_to(dhcp_packet.get_buffer(), dest)?;
                             info!("{}: sent DHCPACK", transaction_id);
                         }
