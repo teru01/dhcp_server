@@ -30,12 +30,12 @@ const OPTION_END: u8 = 255;
 use super::database;
 use super::util;
 
-pub struct DhcpPacket<'a> {
-    buffer: &'a mut [u8],
+pub struct DhcpPacket {
+    buffer: Box<[u8]>,
 }
 
-impl<'a> DhcpPacket<'a> {
-    pub fn new(buf: &mut [u8]) -> Option<DhcpPacket> {
+impl DhcpPacket {
+    pub fn new(buf: Box<[u8]>) -> Option<DhcpPacket> {
         if buf.len() > DHCP_MINIMUM_SIZE {
             let packet = DhcpPacket { buffer: buf };
             return Some(packet);
@@ -44,7 +44,7 @@ impl<'a> DhcpPacket<'a> {
     }
 
     pub fn get_buffer(&self) -> &[u8] {
-        self.buffer
+        self.buffer.as_ref()
     }
 
     pub fn get_op(&self) -> u8 {

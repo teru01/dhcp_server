@@ -326,13 +326,13 @@ fn dhcp_handler(
     }
 }
 
-fn make_dhcp_packet<'a>(
+fn make_dhcp_packet(
     incoming_packet: &DhcpPacket,
     dhcp_server: &DhcpServer,
     message_type: u8,
-    buffer: &'a mut [u8],
-    target_ip: &Ipv4Addr,
-) -> Result<DhcpPacket<'a>, io::Error> {
+    ip_to_be_leased: &Ipv4Addr,
+) -> Result<DhcpPacket, io::Error> {
+    let buffer = Box::new([0u8; DHCP_SIZE]);
     let mut dhcp_packet = DhcpPacket::new(buffer).unwrap();
     dhcp_packet.set_op(BOOTREPLY);
     dhcp_packet.set_htype(HTYPE_ETHER);
@@ -341,7 +341,7 @@ fn make_dhcp_packet<'a>(
     if incoming_packet.get_giaddr() != Ipv4Addr::new(0, 0, 0, 0) {
         dhcp_packet.set_flags(incoming_packet.get_flags());
     }
-    dhcp_packet.set_yiaddr(target_ip);
+    dhcp_packet.set_yiaddr(ip_to_be_leased);
     let client_macaddr = incoming_packet.get_chaddr();
     dhcp_packet.set_chaddr(&client_macaddr);
 
