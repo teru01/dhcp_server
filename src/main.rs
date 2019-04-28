@@ -1,12 +1,7 @@
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::thread;
 use std::{env, io, net};
-
-use pnet::util::MacAddr;
-
-use ipnetwork::Ipv4Network;
 
 use failure;
 
@@ -46,155 +41,11 @@ const BOOTREPLY: u8 = 2;
 
 mod dhcp;
 use dhcp::DhcpPacket;
+use dhcp::DhcpServer;
 
 mod util;
 
-use rusqlite::Connection;
 mod database;
-
-type LeaseEntry = HashMap<MacAddr, Ipv4Addr>;
-
-struct DhcpServer {
-    used_ipaddr_table: RwLock<LeaseEntry>, //MACアドレスとリースIPのマップ
-    address_pool: RwLock<Vec<Ipv4Addr>>,   //利用可能なアドレス。降順に並ぶ。
-    db_connection: Mutex<Connection>, // ConnectionはSyncを実装しないのでRwLockではだめ。
-    server_address: Ipv4Addr,
-    default_gateway: Ipv4Addr,
-    subnet_mask: Ipv4Addr,
-    dns_server: Ipv4Addr,
-    lease_time: Vec<u8>,
-}
-
-impl DhcpServer {
-    fn new() -> Result<DhcpServer, failure::Error> {
-        // envから設定情報の読み込み
-        // アドレスプールの設定、使用中マップの
-        let env = util::load_env();
-
-        // DNSやゲートウェイなどのアドレス
-        let static_addresses = util::obtain_static_addresses(&env)?;
-
-        let con = Connection::open("dhcp.db")?;
-
-        let used_ipaddr_table = Self::init_used_ipaddr_table(&con)?;
-        info!("There are {} leased entries", used_ipaddr_table.len());
-
-        let addr_pool = Self::init_address_pool(&used_ipaddr_table, &static_addresses)?;
-        info!(
-            "There are {} addresses in the address pool",
-            addr_pool.len()
-        );
-
-        let lease_v = util::make_vec_from_u32(
-            env.get("LEASE_TIME")
-                .expect("Missing lease_time")
-                .parse()
-                .unwrap(),
-        )?;
-
-        return Ok(DhcpServer {
-            used_ipaddr_table: RwLock::new(used_ipaddr_table),
-            address_pool: RwLock::new(addr_pool),
-            db_connection: Mutex::new(con),
-            server_address: *static_addresses.get("dhcp_server_addr").unwrap(),
-            default_gateway: *static_addresses.get("default_gateway").unwrap(),
-            subnet_mask: *static_addresses.get("subnet_mask").unwrap(),
-            dns_server: *static_addresses.get("dns_addr").unwrap(),
-            lease_time: lease_v,
-        });
-    }
-
-    // 新たなホストに割り当て可能なアドレスプールを初期化
-    // ネットワーク中のアドレスからデフォルトゲートウェイ、DNSサーバ、DHCPサーバ自身、
-    // ブロードキャストアドレス、ネットワークアドレス、すでに割り当て済みのIPアドレスを除く
-    fn init_address_pool(
-        used_ipaddr_table: &LeaseEntry,
-        static_addresses: &HashMap<String, Ipv4Addr>,
-    ) -> Result<Vec<Ipv4Addr>, failure::Error> {
-        let network_addr = static_addresses.get("network_addr").unwrap();
-        let prefix = ipnetwork::ipv4_mask_to_prefix(*static_addresses.get("subnet_mask").unwrap())?;
-        let network_addr_with_prefix = Ipv4Network::new(*network_addr, prefix)?;
-        let default_gateway = static_addresses.get("default_gateway").unwrap();
-        let dhcp_server_addr = static_addresses.get("dhcp_server_addr").unwrap();
-        let dns_server_addr = static_addresses.get("dns_addr").unwrap();
-        let broadcast = network_addr_with_prefix.broadcast();
-
-        // すでに使用されているアドレス。
-        let mut used_ip_addrs: Vec<&Ipv4Addr> = used_ipaddr_table.values().collect();
-
-        used_ip_addrs.push(network_addr);
-        used_ip_addrs.push(default_gateway);
-        used_ip_addrs.push(dhcp_server_addr);
-        used_ip_addrs.push(dns_server_addr);
-        used_ip_addrs.push(&broadcast);
-
-        let mut addr_pool: Vec<Ipv4Addr> = network_addr_with_prefix
-            .iter() // TODO rev()の実装
-            .filter(|addr| !used_ip_addrs.contains(&addr))
-            .collect();
-        addr_pool.reverse();
-
-        return Ok(addr_pool);
-    }
-
-    // DBから使用中のIP情報を取得する
-    fn init_used_ipaddr_table(con: &Connection) -> Result<LeaseEntry, failure::Error> {
-        let entries = match database::get_all_entries(&con) {
-            Ok(rows) => rows,
-            Err(e) => {
-                error!("{:?}", e);
-                return Err(failure::err_msg("Database Error"));
-            }
-        };
-        return Ok(entries);
-    }
-
-    fn insert_entry(&self, key: MacAddr, value: Ipv4Addr) {
-        // 利用中IPアドレスのテーブルにinsertする。insertしたら即ロックを解放する。
-        let mut table_lock = self.used_ipaddr_table.write().unwrap();
-        table_lock.insert(key, value);
-    }
-
-    // ロックを取得し、エントリーがあればそれを返す
-    fn get_entry(&self, key: MacAddr) -> Option<Ipv4Addr> {
-        let table_lock = self.used_ipaddr_table.read().unwrap();
-        match table_lock.get(&key) {
-            Some(ip) => return Some(ip.clone()),
-            None => return None,
-        };
-    }
-
-    fn pick_entry(&self, mac_addr: MacAddr) -> Option<Ipv4Addr> {
-        let mut table_lock = self.used_ipaddr_table.write().unwrap();
-        return table_lock.remove(&mac_addr);
-    }
-
-    // ロックを取得し、アドレスプールの最後を引き抜いて返す
-    fn pick_available_ip(&self) -> Option<Ipv4Addr> {
-        let mut lock = self.address_pool.write().unwrap();
-        return lock.pop();
-    }
-
-    // ロックを取得し、アドレスプールから指定のアドレスを検索し、それを引き抜いて返す
-    fn pick_specified_ip(&self, requested_ip: &Ipv4Addr) -> Option<Ipv4Addr> {
-        let mut lock = self.address_pool.write().unwrap();
-        // 線形探索。2分探索もあり
-        for i in 0..lock.len() {
-            if &lock[i] == requested_ip {
-                let ip_to_be_leased = lock[i].clone();
-                lock.remove(i);
-                return Some(ip_to_be_leased);
-            }
-        }
-        None
-    }
-
-    // アドレスプールにアドレスを戻す。
-    fn push_address(&self, released_ip: Ipv4Addr) {
-        let mut lock = self.address_pool.write().unwrap();
-        lock.push(released_ip);
-    }
-}
 
 fn main() {
     env::set_var("RUST_LOG", "debug");

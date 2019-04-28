@@ -3,7 +3,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
+use byteorder::{BigEndian, WriteBytesExt};
 use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
 use pnet::packet::icmp::IcmpTypes;
 use pnet::packet::ip::IpNextHeaderProtocols;
