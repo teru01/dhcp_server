@@ -17,7 +17,7 @@ use pnet::util::checksum;
 fn test_is_ipaddr_already_in_use() {
     assert_eq!(
         true,
-        is_ipaddr_already_in_use(&"192.168.111.1".parse().unwrap()).unwrap()
+        is_ipaddr_already_in_use("192.168.111.1".parse().unwrap()).unwrap()
     );
 }
 
@@ -30,13 +30,13 @@ pub fn create_default_icmp_buffer() -> [u8; 8] {
     icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
     let checksum = checksum(icmp_packet.to_immutable().packet(), 16);
     icmp_packet.set_checksum(checksum);
-    return buffer;
+    buffer
 }
 
 /**
  * IPアドレスがすでに使用されているか調べる。
  */
-pub fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::Error> {
+pub fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Error> {
     let icmp_buf = create_default_icmp_buffer();
     let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
 
@@ -44,7 +44,7 @@ pub fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::E
         1024,
         TransportChannelType::Layer4(Ipv4(IpNextHeaderProtocols::Icmp)),
     )?;
-    transport_sender.send_to(icmp_packet, IpAddr::V4(*target_ip))?;
+    transport_sender.send_to(icmp_packet, IpAddr::V4(target_ip))?;
 
     let (sender, receiver) = mpsc::channel();
 
@@ -72,9 +72,9 @@ pub fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::E
  */
 pub fn u8_to_ipv4addr(buf: &[u8]) -> Option<Ipv4Addr> {
     if buf.len() == 4 {
-        return Some(Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]));
+        Some(Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]))
     } else {
-        return None;
+        None
     }
 }
 
@@ -91,7 +91,7 @@ pub fn load_env() -> HashMap<String, String> {
             map.insert(elm[0].to_string(), elm[1].to_string());
         }
     }
-    return map;
+    map
 }
 
 /**
@@ -128,17 +128,17 @@ pub fn obtain_static_addresses(
     map.insert("dhcp_server_addr".to_string(), dhcp_server_address);
     map.insert("default_gateway".to_string(), default_gateway);
     map.insert("dns_addr".to_string(), dns_addr);
-    return Ok(map);
+    Ok(map)
 }
 
 pub fn make_vec_from_u32(i: u32) -> Result<Vec<u8>, io::Error> {
     let mut v = Vec::new();
     v.write_u32::<BigEndian>(i)?;
-    return Ok(v);
+    Ok(v)
 }
 
 pub fn send_dhcp_broadcast_response(soc: &UdpSocket, data: &[u8]) -> Result<(), failure::Error> {
     let destination: SocketAddr = "255.255.255.255:68".parse()?;
     soc.send_to(data, destination)?;
-    return Ok(());
+    Ok(())
 }

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::ptr;
 use std::sync::{Mutex, RwLock};
 
 use ipnetwork::Ipv4Network;
@@ -98,11 +97,11 @@ impl DhcpPacket {
         self.buffer[FLAGS..CIADDR].copy_from_slice(flags);
     }
 
-    pub fn set_yiaddr(&mut self, yiaddr: &Ipv4Addr) {
+    pub fn set_yiaddr(&mut self, yiaddr: Ipv4Addr) {
         self.buffer[YIADDR..SIADDR].copy_from_slice(&yiaddr.octets());
     }
 
-    pub fn set_chaddr(&mut self, chaddr: &MacAddr) {
+    pub fn set_chaddr(&mut self, chaddr: MacAddr) {
         let t = chaddr.to_primitive_values();
         let macaddr_value = [t.0, t.1, t.2, t.3, t.4, t.5];
         // ここだけCHADDR..SNAMEでないのは、chaddrフィールドが16オクテット確保されているため。
@@ -208,10 +207,10 @@ impl DhcpServer {
             used_ipaddr_table: RwLock::new(used_ipaddr_table),
             address_pool: RwLock::new(addr_pool),
             db_connection: Mutex::new(con),
-            server_address: *static_addresses.get("dhcp_server_addr").unwrap(),
-            default_gateway: *static_addresses.get("default_gateway").unwrap(),
-            subnet_mask: *static_addresses.get("subnet_mask").unwrap(),
-            dns_server: *static_addresses.get("dns_addr").unwrap(),
+            server_address: static_addresses["dhcp_server_addr"],
+            default_gateway: static_addresses["default_gateway"],
+            subnet_mask: static_addresses["subnet_mask"],
+            dns_server: static_addresses["dns_addr"],
             lease_time: lease_v,
         })
     }
@@ -258,7 +257,7 @@ impl DhcpServer {
                 return Err(failure::err_msg("Database Error"));
             }
         };
-        return Ok(entries);
+        Ok(entries)
     }
 
     // リーステーブルにエントリを追加
@@ -282,13 +281,11 @@ impl DhcpServer {
         lock.pop()
     }
 
-    pub fn pick_specified_ip(&self, requested_ip: &Ipv4Addr) -> Option<Ipv4Addr> {
+    pub fn pick_specified_ip(&self, requested_ip: Ipv4Addr) -> Option<Ipv4Addr> {
         let mut lock = self.address_pool.write().unwrap();
         for i in 0..lock.len() {
-            if &lock[i] == requested_ip {
-                let ip_to_be_leased = lock[i].clone();
-                lock.remove(i);
-                return Some(ip_to_be_leased);
+            if lock[i] == requested_ip {
+                return Some(lock.remove(i));
             }
         }
         None
