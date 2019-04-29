@@ -1,21 +1,22 @@
+use byteorder::{BigEndian, ByteOrder};
+use env_logger;
+use failure;
+use log::{debug, error, info, warn};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::thread;
 use std::{env, io, net};
-
-use failure;
-
-use byteorder::{BigEndian, ByteOrder};
-
 #[macro_use]
 extern crate log;
+use dhcp::DhcpPacket;
+use dhcp::DhcpServer;
 
-use env_logger;
-use log::{debug, error, info, warn};
+mod database;
+mod dhcp;
+mod util;
 
 const HTYPE_ETHER: u8 = 1;
 const HLEN_MACADDR: u8 = 6;
-
 const DHCP_SIZE: usize = 400;
 
 enum Code {
@@ -38,13 +39,6 @@ const DHCPRELEASE: u8 = 7;
 
 const BOOTREQUEST: u8 = 1;
 const BOOTREPLY: u8 = 2;
-
-mod dhcp;
-use dhcp::DhcpPacket;
-use dhcp::DhcpServer;
-
-mod database;
-mod util;
 
 fn main() {
     // ログの設定
@@ -251,7 +245,7 @@ fn dhcp_handler(
 }
 
 /**
- * オプションにrequested ip addressがあり、利用可能ならばそれを返す。
+ * オプションにRequested Ip Addressがあり、利用可能ならばそれを返す。
  */
 fn obtain_available_ip_from_requested_option(
     dhcp_server: Arc<DhcpServer>,
@@ -272,23 +266,25 @@ fn obtain_available_ip_from_requested_option(
     return None;
 }
 
-// 利用可能なIPアドレスを探す。
-// 要求されたものがあればそれを返し、
-// 以前リースされたものがあればそれを返し、
-// アドレスプールから利用可能なIPアドレスを返却する。
+/**
+ * 利用可能なIPアドレスを選ぶ。
+ * クライアントから要求されたアドレス、以前そのクライアントにリースされたアドレス、
+ * アドレスプールの優先順位で利用可能なIPアドレスを返却する。
+ */
 fn select_lease_ip(
     dhcp_server: Arc<DhcpServer>,
     received_packet: &DhcpPacket,
 ) -> Result<Ipv4Addr, failure::Error> {
-    // Requested Ip Addrオプションからの取得
+    // Requested Ip Addrオプションがあり、利用可能ならばそのIPアドレスを返却。
     if let Some(ip_to_be_leased) =
         obtain_available_ip_from_requested_option(dhcp_server.clone(), &received_packet)
     {
+        // リーステーブルに登録してそのアドレスを返す。
         dhcp_server.insert_entry(received_packet.get_chaddr(), ip_to_be_leased);
         return Ok(ip_to_be_leased);
     }
 
-    // usedからの取得
+    // リーステーブルからの取得。エントリがあればそれを返す。
     if let Some(ip_from_used) = dhcp_server.get_entry(received_packet.get_chaddr()) {
         if let Ok(in_use) = util::is_ipaddr_already_in_use(&ip_from_used) {
             if !in_use {
@@ -310,17 +306,24 @@ fn select_lease_ip(
             }
         }
     }
+    // 利用できるIPアドレスが取得できなかった場合
     return Err(failure::err_msg("Could not obtain available ip address."));
 }
 
+/**
+ * DHCPのパケットを作成して返す。
+ */
 fn make_dhcp_packet(
     incoming_packet: &DhcpPacket,
     dhcp_server: &DhcpServer,
     message_type: u8,
     ip_to_be_leased: &Ipv4Addr,
 ) -> Result<DhcpPacket, io::Error> {
+    // パケットの本体となるバッファ。ヒープに確保する。
     let buffer = Box::new([0u8; DHCP_SIZE]);
     let mut dhcp_packet = DhcpPacket::new(buffer).unwrap();
+
+    // 各種フィールドの設定
     dhcp_packet.set_op(BOOTREPLY);
     dhcp_packet.set_htype(HTYPE_ETHER);
     dhcp_packet.set_hlen(HLEN_MACADDR);
@@ -332,6 +335,7 @@ fn make_dhcp_packet(
     let client_macaddr = incoming_packet.get_chaddr();
     dhcp_packet.set_chaddr(&client_macaddr);
 
+    // 各種オプションの設定
     let mut cursor = dhcp::OPTIONS;
     dhcp_packet.set_magic_cookie(&mut cursor);
     dhcp_packet.set_option(
@@ -368,7 +372,7 @@ fn make_dhcp_packet(
         &mut cursor,
         Code::DNS as u8,
         4,
-        Some(&dhcp_server.dns_server.octets()), // TODO DNS
+        Some(&dhcp_server.dns_server.octets()),
     );
 
     dhcp_packet.set_option(&mut cursor, Code::End as u8, 0, None);

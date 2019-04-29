@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::net::{AddrParseError, IpAddr, Ipv4Addr};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use std::{fs, io};
 
 use byteorder::{BigEndian, WriteBytesExt};
 use pnet::packet::icmp::echo_request::{EchoRequestPacket, MutableEchoRequestPacket};
@@ -10,8 +12,6 @@ use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::Packet;
 use pnet::transport::{self, icmp_packet_iter, TransportChannelType, TransportProtocol::Ipv4};
 use pnet::util::checksum;
-use std::collections::HashMap;
-use std::{fs, io};
 
 #[test]
 fn test_is_ipaddr_already_in_use() {
