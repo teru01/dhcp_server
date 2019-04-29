@@ -48,6 +48,7 @@ fn main() {
     let server_socket = UdpSocket::bind("0.0.0.0:67").expect("Failed to bind socket");
     server_socket.set_broadcast(true).unwrap();
 
+    // ヒープ上にDhcpServer構造体を確保し、複数のスレッドから共有するためArcを利用している。
     let dhcp_server = Arc::new(match DhcpServer::new() {
         Ok(dhcp) => dhcp,
         Err(e) => {

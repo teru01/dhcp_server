@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{AddrParseError, IpAddr, Ipv4Addr, UdpSocket, SocketAddr};
+use std::net::{AddrParseError, IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -43,44 +43,27 @@ pub fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::E
     let (mut transport_sender, mut transport_receiver) = transport::transport_channel(
         1024,
         TransportChannelType::Layer4(Ipv4(IpNextHeaderProtocols::Icmp)),
-    )
-    .unwrap();
-    if transport_sender
-        .send_to(icmp_packet, IpAddr::V4(target_ip.clone()))
-        .is_err()
-    {
-        return Err(failure::err_msg("Failed to send icmp echo."));
-    }
+    )?;
+    transport_sender.send_to(icmp_packet, IpAddr::V4(*target_ip))?;
 
     let (sender, receiver) = mpsc::channel();
 
+    // ICMP echoリクエストのリプライに対してタイムアウトを設定するため、スレッドを起動する。
     thread::spawn(move || {
-        match icmp_packet_iter(&mut transport_receiver).next() {
-            Ok((packet, _)) => {
-                match packet.get_icmp_type() {
-                    IcmpTypes::EchoReply => {
-                        if sender.send(true).is_err() {
-                            // タイムアウトしているとき
-                            return;
-                        };
-                    }
-                    _ => {
-                        if sender.send(false).is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-            _ => error!("Failed to receive icmp echo reply."),
+        let mut iter = icmp_packet_iter(&mut transport_receiver);
+        let (packet, _) = iter.next().unwrap();
+        if packet.get_icmp_type() == IcmpTypes::EchoReply {
+            sender.send(true);
         }
     });
 
-    if let Ok(is_used) = receiver.recv_timeout(Duration::from_millis(30)) {
-        return Ok(is_used);
+    // recvは相手のチャネルがドロップされると失敗する。
+    if receiver.recv_timeout(Duration::from_millis(30)).is_ok() {
+        Ok(true)
     } else {
         // タイムアウトした時。アドレスは使われていない
         debug!("not received reply within timeout");
-        return Ok(false);
+        Ok(false)
     }
 }
 
@@ -145,7 +128,6 @@ pub fn make_vec_from_u32(i: u32) -> Result<Vec<u8>, io::Error> {
     v.write_u32::<BigEndian>(i)?;
     return Ok(v);
 }
-
 
 pub fn send_dhcp_broadcast_response(soc: &UdpSocket, data: &[u8]) -> Result<(), failure::Error> {
     let destination: SocketAddr = "255.255.255.255:68".parse()?;
