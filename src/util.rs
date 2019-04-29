@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{AddrParseError, IpAddr, Ipv4Addr};
+use std::net::{AddrParseError, IpAddr, Ipv4Addr, UdpSocket, SocketAddr};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -21,6 +21,9 @@ fn test_is_ipaddr_already_in_use() {
     );
 }
 
+/**
+ * ICMP echoリクエストのバッファを作成する。
+ */
 pub fn create_default_icmp_buffer() -> [u8; 8] {
     let mut buffer = [0u8; 8];
     let mut icmp_packet = MutableEchoRequestPacket::new(&mut buffer).unwrap();
@@ -30,8 +33,9 @@ pub fn create_default_icmp_buffer() -> [u8; 8] {
     return buffer;
 }
 
-// IPアドレスが既に使用されているか調べる。
-// TODO: tr, tsはArcを使えば生成は1回だけで良い？
+/**
+ * IPアドレスがすでに使用されているか調べる。
+ */
 pub fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::Error> {
     let icmp_buf = create_default_icmp_buffer();
     let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
@@ -140,4 +144,11 @@ pub fn make_vec_from_u32(i: u32) -> Result<Vec<u8>, io::Error> {
     let mut v = Vec::new();
     v.write_u32::<BigEndian>(i)?;
     return Ok(v);
+}
+
+
+pub fn send_dhcp_broadcast_response(soc: &UdpSocket, data: &[u8]) -> Result<(), failure::Error> {
+    let destination: SocketAddr = "255.255.255.255:68".parse()?;
+    soc.send_to(data, destination)?;
+    return Ok(());
 }
