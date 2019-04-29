@@ -53,7 +53,7 @@ pub fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::E
         let mut iter = icmp_packet_iter(&mut transport_receiver);
         let (packet, _) = iter.next().unwrap();
         if packet.get_icmp_type() == IcmpTypes::EchoReply {
-            sender.send(true);
+            sender.send(true).unwrap();
         }
     });
 
@@ -67,6 +67,9 @@ pub fn is_ipaddr_already_in_use(target_ip: &Ipv4Addr) -> Result<bool, failure::E
     }
 }
 
+/**
+ * スライスをIpv4アドレスに変換して返す
+ */
 pub fn u8_to_ipv4addr(buf: &[u8]) -> Option<Ipv4Addr> {
     if buf.len() == 4 {
         return Some(Ipv4Addr::new(buf[0], buf[1], buf[2], buf[3]));
@@ -75,7 +78,9 @@ pub fn u8_to_ipv4addr(buf: &[u8]) -> Option<Ipv4Addr> {
     }
 }
 
-// 環境情報を読んでハッシュマップを返す
+/**
+ * .envから環境情報を読んでハッシュマップを返す
+ */
 pub fn load_env() -> HashMap<String, String> {
     let contents = fs::read_to_string(".env").expect("Failed to read env file");
     let lines: Vec<_> = contents.split('\n').collect();
@@ -89,6 +94,9 @@ pub fn load_env() -> HashMap<String, String> {
     return map;
 }
 
+/**
+ * 固定されたアドレス情報を返す
+ */
 pub fn obtain_static_addresses(
     env: &HashMap<String, String>,
 ) -> Result<HashMap<String, Ipv4Addr>, AddrParseError> {

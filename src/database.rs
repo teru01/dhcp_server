@@ -32,11 +32,11 @@ pub fn get_all_entries(con: &Connection) -> Result<LeaseEntry, rusqlite::Error> 
 
         mac_ip_map.insert(mac_addr, ip_addr);
     }
-    return Ok(mac_ip_map);
+    Ok(mac_ip_map)
 }
 
 /**
- * 指定のMACアドレスをもつレコードの件数を返す
+ * 指定のMACアドレスを持つレコードの件数を返す
  */
 pub fn count_records_by_mac_addr(
     tx: &Transaction,
@@ -52,7 +52,7 @@ pub fn count_records_by_mac_addr(
             return Err(rusqlite::Error::QueryReturnedNoRows);
         }
     };
-    return Ok(count);
+    Ok(count)
 }
 
 /**
@@ -67,7 +67,7 @@ pub fn insert_entry(
         "INSERT INTO lease_entries (mac_addr, ip_addr) VALUES (?1, ?2)",
         params![mac_addr.to_string(), ip_addr.to_string()],
     )?;
-    return Ok(());
+    Ok(())
 }
 
 /**
@@ -82,7 +82,7 @@ pub fn update_entry(
         "UPDATE lease_entries SET ip_addr = ?2 WHERE mac_addr = ?1",
         params![mac_addr.to_string(), ip_addr.to_string()],
     )?;
-    return Ok(());
+    Ok(())
 }
 
 /**
@@ -93,5 +93,5 @@ pub fn delete_entry(tx: &Transaction, mac_addr: &MacAddr) -> Result<(), rusqlite
         "DELETE FROM lease_entries WHERE mac_addr = ?",
         params![mac_addr.to_string(),],
     )?;
-    return Ok(());
+    Ok(())
 }
