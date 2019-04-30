@@ -137,7 +137,7 @@ fn dhcp_handler(
         },
 
         DHCPRELEASE => {
-            dhcp_release_message_handler(transaction_id, dhcp_server, client_macaddr)
+            dhcp_release_message_handler(transaction_id, dhcp_server, &packet, client_macaddr)
         }
 
         _ => {
@@ -167,9 +167,6 @@ fn dhcp_discover_message_handler(
     // IPアドレスの決定
     let ip_to_be_leased = select_lease_ip(&dhcp_server, &received_packet)?;
 
-    // リーステーブルにエントリを追加する。
-    dhcp_server.insert_entry(client_macaddr, ip_to_be_leased);
-
     // 決定したリースIPでDHCPパケットの作成
     let dhcp_packet =
         make_dhcp_packet(&received_packet, &dhcp_server, DHCPOFFER, ip_to_be_leased)?;
@@ -198,18 +195,13 @@ fn dhcp_request_message_handler_responded_to_offer(
 
     if server_ip != dhcp_server.server_address {
         // クライアントが別のDHCPサーバを選択した場合。
-
         info!("Client has chosen another dhcp server.");
-        // リーステーブルとアドレスプールを元に戻す。
-        if let Some(ip) = dhcp_server.pick_entry(client_macaddr) {
-            dhcp_server.push_address(ip);
-        }
-
-        debug!("deleted from lease_entries");
         return Ok(());
     }
 
-    let ip_to_be_leased = dhcp_server.get_entry(client_macaddr).unwrap();
+    // OFFERに対する応答の場合、必ず'requested IP address'にリース予定のIPアドレスが含まれる（RFC2131 P30)
+    let ip_bin = received_packet.get_option(Code::RequestedIpAddress as u8).unwrap();
+    let ip_to_be_leased = util::u8_to_ipv4addr(&ip_bin).ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
 
     let mut con = dhcp_server.db_connection.lock().unwrap();
     let tx = con.transaction()?;
@@ -250,20 +242,24 @@ fn dhcp_request_message_handler_to_extend_lease(
 ) -> Result<(), failure::Error> {
     info!("{:x}: received DHCPREQUEST without server_id", xid);
 
-    let prev_allocated_ip = dhcp_server.get_entry(client_macaddr).unwrap();
-    let ciaddr = received_packet.get_ciaddr();
-    if ciaddr != prev_allocated_ip {
-        // 以前リースした値とクライアントのciaddrが一致しない場合はNAKを返す。// TODO: rfc2131で不要に
-        // TODO: アドレスをプールに返してテーブルを削除
-        let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPNAK, ciaddr)?;
-        util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
-        info!("{:x}: sent DHCPNAK", xid);
-        return Ok(());
-    }
-    // TODO: クライアントからのrequested_ip_addrから取得できる
-    let ip_to_be_leased = select_lease_ip(&dhcp_server, received_packet)?;
+    let client_ip = if let Some(requested_ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
+        // クライアントがINIT-REBOOT状態にあるとき
+        // レコードがないなら何もしない
+        let mut con = dhcp_server.db_connection.lock().unwrap();
+        let tx = con.transaction()?;
+        match database::select_entry(&tx, client_macaddr) {
+            Ok(ip) => ip,
+            Err(e) => {
+                error!("{}", e);
+                return Ok(());
+            }
+        }
+    } else {
+        received_packet.get_ciaddr()
+    };
+
     // ACKを返す。
-    let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip_to_be_leased)?;
+    let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, client_ip)?;
     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
     info!("{:x}: sent DHCPACK", xid);
     Ok(())
@@ -277,23 +273,20 @@ fn dhcp_request_message_handler_to_extend_lease(
 fn dhcp_release_message_handler(
     xid: u32,
     dhcp_server: Arc<DhcpServer>,
+    received_packet: &DhcpPacket,
     client_macaddr: MacAddr,
 ) -> Result<(), failure::Error> {
     info!("{:x}: received DHCPRELEASE", xid);
 
-    // コネクションのロックを取得してクリティカルセクションの開始。
     let mut con = dhcp_server.db_connection.lock().unwrap();
     let tx = con.transaction()?;
     database::delete_entry(&tx, client_macaddr)?;
     tx.commit()?;
-    // コネクションのロックを解放してクリティカルセクションの終了。
     drop(con);
 
     debug!("{:x}: deleted from DB", xid);
     // リーステーブルからIPアドレスを取り出しアドレスプールに戻す。
-    if let Some(ip) = dhcp_server.pick_entry(client_macaddr) {
-        dhcp_server.push_address(ip);
-    }
+    dhcp_server.release_address(received_packet.get_ciaddr());
     Ok(())
 }
 
@@ -328,23 +321,25 @@ fn select_lease_ip(
     dhcp_server: &Arc<DhcpServer>,
     received_packet: &DhcpPacket,
 ) -> Result<Ipv4Addr, failure::Error> {
-    //TODO: 配布順序変更
-    // Requested Ip Addrオプションがあり、利用可能ならばそのIPアドレスを返却。
-    if let Some(ip_to_be_leased) =
-        obtain_available_ip_from_requested_option(dhcp_server, &received_packet)
-    {
-        // リーステーブルに登録してそのアドレスを返す。
-        dhcp_server.insert_entry(received_packet.get_chaddr(), ip_to_be_leased);
-        return Ok(ip_to_be_leased);
-    }
+    let mut con = dhcp_server.db_connection.lock().unwrap();
+    let tx = con.transaction()?;
 
-    // リーステーブルからの取得。エントリがあればそれを返す。
-    if let Some(ip_from_used) = dhcp_server.get_entry(received_packet.get_chaddr()) {
+    // DBから以前リースしたIPアドレスがあればそれを返す。
+    if let Ok(ip_from_used) = database::select_entry(&tx, received_packet.get_chaddr()) {
         if let Ok(in_use) = util::is_ipaddr_already_in_use(ip_from_used) {
             if !in_use {
                 return Ok(ip_from_used);
             }
         }
+    }
+    tx.commit()?;
+    drop(con);
+
+    // Requested Ip Addrオプションがあり、利用可能ならばそのIPアドレスを返却。
+    if let Some(ip_to_be_leased) =
+        obtain_available_ip_from_requested_option(dhcp_server, &received_packet)
+    {
+        return Ok(ip_to_be_leased);
     }
 
     // アドレスプールからの取得
@@ -386,8 +381,7 @@ fn make_dhcp_packet(
         dhcp_packet.set_flags(received_packet.get_flags());
     }
     dhcp_packet.set_yiaddr(ip_to_be_leased);
-    let client_macaddr = received_packet.get_chaddr();
-    dhcp_packet.set_chaddr(client_macaddr); //TODO: refactor
+    dhcp_packet.set_chaddr(received_packet.get_chaddr());
 
     // 各種オプションの設定
     let mut cursor = dhcp::OPTIONS;
