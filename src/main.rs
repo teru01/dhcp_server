@@ -239,7 +239,7 @@ fn dhcp_request_message_handler_responded_to_offer(
 
 /**
  * REQUESTメッセージのオプションにserver_identifierが含まれない場合のハンドラ
- * IPリース延長要求などを処理する。
+ * IPリース延長要求、以前割り当てられていたIPの確認などを処理する。
  */
 fn dhcp_request_message_handler_to_extend_lease(
     xid: u32,
@@ -253,13 +253,14 @@ fn dhcp_request_message_handler_to_extend_lease(
     let prev_allocated_ip = dhcp_server.get_entry(client_macaddr).unwrap();
     let ciaddr = received_packet.get_ciaddr();
     if ciaddr != prev_allocated_ip {
-        // 以前リースした値とクライアントのciaddrが一致しない場合はNAKを返す。
+        // 以前リースした値とクライアントのciaddrが一致しない場合はNAKを返す。// TODO: rfc2131で不要に
+        // TODO: アドレスをプールに返してテーブルを削除
         let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPNAK, ciaddr)?;
         util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
         info!("{:x}: sent DHCPNAK", xid);
         return Ok(());
     }
-
+    // TODO: クライアントからのrequested_ip_addrから取得できる
     let ip_to_be_leased = select_lease_ip(&dhcp_server, received_packet)?;
     // ACKを返す。
     let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip_to_be_leased)?;
@@ -327,6 +328,7 @@ fn select_lease_ip(
     dhcp_server: &Arc<DhcpServer>,
     received_packet: &DhcpPacket,
 ) -> Result<Ipv4Addr, failure::Error> {
+    //TODO: 配布順序変更
     // Requested Ip Addrオプションがあり、利用可能ならばそのIPアドレスを返却。
     if let Some(ip_to_be_leased) =
         obtain_available_ip_from_requested_option(dhcp_server, &received_packet)
@@ -385,7 +387,7 @@ fn make_dhcp_packet(
     }
     dhcp_packet.set_yiaddr(ip_to_be_leased);
     let client_macaddr = received_packet.get_chaddr();
-    dhcp_packet.set_chaddr(client_macaddr);
+    dhcp_packet.set_chaddr(client_macaddr); //TODO: refactor
 
     // 各種オプションの設定
     let mut cursor = dhcp::OPTIONS;
