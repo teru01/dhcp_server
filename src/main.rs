@@ -95,7 +95,6 @@ fn dhcp_handler(
     soc: &UdpSocket,
     dhcp_server: Arc<DhcpServer>,
 ) -> Result<(), failure::Error> {
-    // DHCPのヘッダ読み取り
     let message = packet
         .get_option(Code::MessageType as u8)
         .ok_or_else(|| failure::err_msg("specified option was not found"))?;
@@ -109,7 +108,6 @@ fn dhcp_handler(
                 transaction_id,
                 dhcp_server,
                 &packet,
-                client_macaddr,
                 soc,
             )
         }
@@ -159,7 +157,6 @@ fn dhcp_discover_message_handler(
     xid: u32,
     dhcp_server: Arc<DhcpServer>,
     received_packet: &DhcpPacket,
-    client_macaddr: MacAddr,
     soc: &UdpSocket,
 ) -> Result<(), failure::Error> {
     info!("{:x}: received DHCPDISCOVER", xid);
@@ -205,7 +202,6 @@ fn dhcp_request_message_handler_responded_to_offer(
 
     let mut con = dhcp_server.db_connection.lock().unwrap();
     let tx = con.transaction()?;
-    // macaddrがすでに存在する場合がある。（起動後DBに保存されていたもの、または途中で要求するIPを変更する場合）
     let count = database::count_records_by_mac_addr(&tx, client_macaddr)?;
     match count {
         // レコードがないならinsert
@@ -242,33 +238,42 @@ fn dhcp_request_message_handler_to_extend_lease(
 ) -> Result<(), failure::Error> {
     info!("{:x}: received DHCPREQUEST without server_id", xid);
 
-    let client_ip = if let Some(requested_ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
+    if let Some(requested_ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
         // クライアントがINIT-REBOOT状態にあるとき
-        // レコードがないなら何もしない
-        let mut con = dhcp_server.db_connection.lock().unwrap();
-        let tx = con.transaction()?;
-        match database::select_entry(&tx, client_macaddr) {
-            Ok(ip) => ip,
+        let requested_ip = util::u8_to_ipv4addr(&requested_ip).ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
+        let con = dhcp_server.db_connection.lock().unwrap();
+        match database::select_entry(&con, client_macaddr) {
+            Ok(ip) => {
+                if ip == requested_ip {
+                    let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip)?;
+                    util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
+                    info!("{:x}: sent DHCPACK", xid);
+                    return Ok(());
+                } else {
+                    let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPNAK, "0.0.0.0".parse().unwrap())?;
+                    util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
+                    info!("{:x}: sent DHCPACK", xid);
+                    return Ok(());
+                }
+            },
             Err(e) => {
-                error!("{}", e);
+                // レコードがないなら何もしてはいけない(RFC2131 P31)
+                warn!("{}", e);
                 return Ok(());
             }
         }
     } else {
-        received_packet.get_ciaddr()
-    };
-
-    // ACKを返す。
-    let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, client_ip)?;
-    util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
-    info!("{:x}: sent DHCPACK", xid);
-    Ok(())
+        // リース延長など
+        let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, received_packet.get_ciaddr())?;
+        util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
+        info!("{:x}: sent DHCPACK", xid);
+        return Ok(());
+    }
 }
 
 /**
  * RELEASEメッセージを受け取った時のハンドラ
- * DBからリース記録、リーステーブルからエントリを削除し、
- * リースしていたIPアドレスをアドレスプールに戻す。
+ * DBからリース記録を論理削除し、リースしていたIPアドレスをアドレスプールに戻す。
  */
 fn dhcp_release_message_handler(
     xid: u32,
@@ -280,18 +285,20 @@ fn dhcp_release_message_handler(
 
     let mut con = dhcp_server.db_connection.lock().unwrap();
     let tx = con.transaction()?;
+
+    // 論理削除。OFFERを返す際に解放済のアドレスを再割り当てする場合があるから
     database::delete_entry(&tx, client_macaddr)?;
     tx.commit()?;
     drop(con);
 
     debug!("{:x}: deleted from DB", xid);
-    // リーステーブルからIPアドレスを取り出しアドレスプールに戻す。
+    // 解放されたアドレスをアドレスプールに戻す。
     dhcp_server.release_address(received_packet.get_ciaddr());
     Ok(())
 }
 
 /**
- * オプションにRequested Ip Addressがあり、利用可能ならばそれを返す。
+ * オプションに'requested IP address'があり、利用可能ならばそれを返す。
  */
 fn obtain_available_ip_from_requested_option(
     dhcp_server: &Arc<DhcpServer>,
@@ -314,25 +321,25 @@ fn obtain_available_ip_from_requested_option(
 
 /**
  * 利用可能なIPアドレスを選ぶ。
- * クライアントから要求されたアドレス、以前そのクライアントにリースされたアドレス、
- * アドレスプールの優先順位で利用可能なIPアドレスを返却する。
+ * 1.以前そのクライアントにリースされたアドレス(解放されたものも含め)
+ * 2.クライアントから要求されたアドレス
+ * 3.アドレスプール
+ * の優先順位で利用可能なIPアドレスを返却する。(RFC2131 P27)
  */
 fn select_lease_ip(
     dhcp_server: &Arc<DhcpServer>,
     received_packet: &DhcpPacket,
 ) -> Result<Ipv4Addr, failure::Error> {
-    let mut con = dhcp_server.db_connection.lock().unwrap();
-    let tx = con.transaction()?;
+    let con = dhcp_server.db_connection.lock().unwrap();
 
     // DBから以前リースしたIPアドレスがあればそれを返す。
-    if let Ok(ip_from_used) = database::select_entry(&tx, received_packet.get_chaddr()) {
+    if let Ok(ip_from_used) = database::select_entry(&con, received_packet.get_chaddr()) {
         if let Ok(in_use) = util::is_ipaddr_already_in_use(ip_from_used) {
             if !in_use {
                 return Ok(ip_from_used);
             }
         }
     }
-    tx.commit()?;
     drop(con);
 
     // Requested Ip Addrオプションがあり、利用可能ならばそのIPアドレスを返却。
@@ -377,10 +384,9 @@ fn make_dhcp_packet(
     dhcp_packet.set_htype(HTYPE_ETHER);
     dhcp_packet.set_hlen(HLEN_MACADDR);
     dhcp_packet.set_xid(received_packet.get_xid());
-    if received_packet.get_giaddr() != Ipv4Addr::new(0, 0, 0, 0) {
-        dhcp_packet.set_flags(received_packet.get_flags());
-    }
     dhcp_packet.set_yiaddr(ip_to_be_leased);
+    dhcp_packet.set_flags(received_packet.get_flags());
+    dhcp_packet.set_giaddr(received_packet.get_giaddr());
     dhcp_packet.set_chaddr(received_packet.get_chaddr());
 
     // 各種オプションの設定

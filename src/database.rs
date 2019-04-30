@@ -2,37 +2,6 @@ use pnet::util::MacAddr;
 use rusqlite::{params, Connection, Transaction, Rows, NO_PARAMS};
 use std::net::Ipv4Addr;
 
-
-// /**
-//  * 全てのリースの一覧を返す
-//  */
-// pub fn get_all_entries(con: &Connection) -> Result<LeaseEntry, rusqlite::Error> {
-//     let mut mac_ip_map = LeaseEntry::new();
-
-//     let mut statement = con.prepare("SELECT mac_addr, ip_addr FROM lease_entries")?;
-//     let mut entries = statement.query(NO_PARAMS)?;
-//     while let Some(entry) = entries.next()? {
-//         let mac_addr: MacAddr = match entry.get(0) {
-//             Ok(mac) => {
-//                 let mac_string: String = mac;
-//                 mac_string.parse().unwrap()
-//             }
-//             Err(_) => continue,
-//         };
-
-//         let ip_addr = match entry.get(1) {
-//             Ok(ip) => {
-//                 let ip_string: String = ip;
-//                 ip_string.parse().unwrap()
-//             }
-//             Err(_) => continue,
-//         };
-
-//         mac_ip_map.insert(mac_addr, ip_addr);
-//     }
-//     Ok(mac_ip_map)
-// }
-
 fn get_addresses_from_row(mut ip_addrs: Rows) -> Result<Vec<Ipv4Addr>, failure::Error> {
     let mut leased_addrs: Vec<Ipv4Addr> = Vec::new();
     while let Some(entry) = ip_addrs.next()? {
@@ -98,8 +67,8 @@ pub fn insert_entry(
 /**
  * 指定のMACアドレスをもつエントリ（論理削除されているものも含めて）のIPアドレスを返す。
  */
-pub fn select_entry(tx: &Transaction, mac_addr: MacAddr) -> Result<Ipv4Addr, failure::Error> {
-    let mut stmnt = tx.prepare("SELECT ip_addr FROM lease_entries WHERE mac_addr = ?1")?;
+pub fn select_entry(con: &Connection, mac_addr: MacAddr) -> Result<Ipv4Addr, failure::Error> {
+    let mut stmnt = con.prepare("SELECT ip_addr FROM lease_entries WHERE mac_addr = ?1")?;
     let mut row = stmnt.query(params![mac_addr.to_string()])?;
     if let Some(entry) = row.next()? {
         let ip = entry.get(0)?;
