@@ -29,6 +29,9 @@ const OPTION_END: u8 = 255;
 use super::database;
 use super::util;
 
+/**
+ * DHCPのパケットを表現する。
+ */
 pub struct DhcpPacket {
     buffer: Box<[u8]>,
 }
