@@ -31,13 +31,14 @@ use super::util;
 
 /**
  * DHCPのパケットを表現する。
+ * バッファはコンパイル時にサイズが決まらないためヒープに確保する。
  */
 pub struct DhcpPacket {
-    buffer: Box<[u8]>,
+    buffer: Vec<u8>,
 }
 
 impl DhcpPacket {
-    pub fn new(buf: Box<[u8]>) -> Option<DhcpPacket> {
+    pub fn new(buf: Vec<u8>) -> Option<DhcpPacket> {
         if buf.len() > DHCP_MINIMUM_SIZE {
             let packet = DhcpPacket { buffer: buf };
             return Some(packet);
