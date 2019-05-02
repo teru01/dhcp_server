@@ -53,12 +53,19 @@ pub fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Er
         let mut iter = icmp_packet_iter(&mut transport_receiver);
         let (packet, _) = iter.next().unwrap();
         if packet.get_icmp_type() == IcmpTypes::EchoReply {
-            sender.send(true).unwrap();
+            match sender.send(true) {
+                Err(_) => { warn!("icmp timeout"); },
+                _ => {
+                    // 送信できた場合は何もせず終了
+                    return;
+                }
+            }
         }
     });
 
     // recvは相手のチャネルがドロップされると失敗する。
-    if receiver.recv_timeout(Duration::from_millis(30)).is_ok() {
+    if receiver.recv_timeout(Duration::from_millis(300)).is_ok() {
+        warn!("ip addr already in use: {}", target_ip);
         Ok(true)
     } else {
         // タイムアウトした時。アドレスは使われていない
