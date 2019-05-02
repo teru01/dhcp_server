@@ -103,35 +103,24 @@ fn dhcp_handler(
     let client_macaddr = packet.get_chaddr();
 
     match message_type {
-        DHCPDISCOVER => {
-            dhcp_discover_message_handler(
+        DHCPDISCOVER => dhcp_discover_message_handler(transaction_id, dhcp_server, &packet, soc),
+
+        DHCPREQUEST => match packet.get_option(Code::ServerIdentifier as u8) {
+            Some(server_id) => dhcp_request_message_handler_responded_to_offer(
                 transaction_id,
                 dhcp_server,
                 &packet,
+                client_macaddr,
                 soc,
-            )
-        }
-
-        DHCPREQUEST => match packet.get_option(Code::ServerIdentifier as u8) {
-            Some(server_id) => {
-                dhcp_request_message_handler_responded_to_offer(
-                    transaction_id,
-                    dhcp_server,
-                    &packet,
-                    client_macaddr,
-                    soc,
-                    server_id,
-                )
-            }
-            None => {
-                dhcp_request_message_handler_to_extend_lease(
-                    transaction_id,
-                    dhcp_server,
-                    &packet,
-                    client_macaddr,
-                    soc,
-                )
-            }
+                server_id,
+            ),
+            None => dhcp_request_message_handler_to_extend_lease(
+                transaction_id,
+                dhcp_server,
+                &packet,
+                client_macaddr,
+                soc,
+            ),
         },
 
         DHCPRELEASE => {
@@ -165,8 +154,7 @@ fn dhcp_discover_message_handler(
     let ip_to_be_leased = select_lease_ip(&dhcp_server, &received_packet)?;
 
     // 決定したリースIPでDHCPパケットの作成
-    let dhcp_packet =
-        make_dhcp_packet(&received_packet, &dhcp_server, DHCPOFFER, ip_to_be_leased)?;
+    let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPOFFER, ip_to_be_leased)?;
     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
 
     info!("{:x}: sent DHCPOFFER", xid);
@@ -187,8 +175,8 @@ fn dhcp_request_message_handler_responded_to_offer(
 ) -> Result<(), failure::Error> {
     info!("{:x}: received DHCPREQUEST with server_id", xid);
 
-    let server_ip =
-        util::u8_to_ipv4addr(&server_id).ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
+    let server_ip = util::u8_to_ipv4addr(&server_id)
+        .ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
 
     if server_ip != dhcp_server.server_address {
         // クライアントが別のDHCPサーバを選択した場合。
@@ -197,8 +185,11 @@ fn dhcp_request_message_handler_responded_to_offer(
     }
 
     // OFFERに対する応答の場合、必ず'requested IP address'にリース予定のIPアドレスが含まれる（RFC2131 P30)
-    let ip_bin = received_packet.get_option(Code::RequestedIpAddress as u8).unwrap();
-    let ip_to_be_leased = util::u8_to_ipv4addr(&ip_bin).ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
+    let ip_bin = received_packet
+        .get_option(Code::RequestedIpAddress as u8)
+        .unwrap();
+    let ip_to_be_leased = util::u8_to_ipv4addr(&ip_bin)
+        .ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
 
     let mut con = dhcp_server.db_connection.lock().unwrap();
     let tx = con.transaction()?;
@@ -240,22 +231,29 @@ fn dhcp_request_message_handler_to_extend_lease(
 
     if let Some(requested_ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
         // クライアントがINIT-REBOOT状態にあるとき
-        let requested_ip = util::u8_to_ipv4addr(&requested_ip).ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
+        let requested_ip = util::u8_to_ipv4addr(&requested_ip)
+            .ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
         let con = dhcp_server.db_connection.lock().unwrap();
         match database::select_entry(&con, client_macaddr) {
             Ok(ip) => {
                 if ip == requested_ip {
-                    let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip)?;
+                    let dhcp_packet =
+                        make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip)?;
                     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
                     info!("{:x}: sent DHCPACK", xid);
                     return Ok(());
                 } else {
-                    let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPNAK, "0.0.0.0".parse().unwrap())?;
+                    let dhcp_packet = make_dhcp_packet(
+                        &received_packet,
+                        &dhcp_server,
+                        DHCPNAK,
+                        "0.0.0.0".parse().unwrap(),
+                    )?;
                     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
                     info!("{:x}: sent DHCPACK", xid);
                     return Ok(());
                 }
-            },
+            }
             Err(e) => {
                 // レコードがないなら何もしてはいけない(RFC2131 P31)
                 warn!("{}", e);
@@ -264,7 +262,12 @@ fn dhcp_request_message_handler_to_extend_lease(
         }
     } else {
         // リース延長など
-        let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, received_packet.get_ciaddr())?;
+        let dhcp_packet = make_dhcp_packet(
+            &received_packet,
+            &dhcp_server,
+            DHCPACK,
+            received_packet.get_ciaddr(),
+        )?;
         util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
         info!("{:x}: sent DHCPACK", xid);
         return Ok(());

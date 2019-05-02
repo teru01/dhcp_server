@@ -163,14 +163,13 @@ impl DhcpPacket {
     }
 }
 
-
 /**
  * DHCPサーバの情報を保持する。
  * 複数のスレッドで共有されるため、フィールドにmutアクセスする際はロックを取得する必要がある。
  * 読み出しだけならフィールドにロックは必要ない。
  */
 pub struct DhcpServer {
-    address_pool: RwLock<Vec<Ipv4Addr>>,   // 利用可能なアドレス。
+    address_pool: RwLock<Vec<Ipv4Addr>>, // 利用可能なアドレス。
     pub db_connection: Mutex<Connection>, // ConnectionはSyncを実装しないのでRwLockではだめ。
     pub server_address: Ipv4Addr,
     pub default_gateway: Ipv4Addr,
@@ -215,7 +214,7 @@ impl DhcpServer {
     // 新たなホストに割り当て可能なアドレスプールを初期化
     fn init_address_pool(
         con: &Connection,
-        static_addresses: &HashMap<String, Ipv4Addr>
+        static_addresses: &HashMap<String, Ipv4Addr>,
     ) -> Result<Vec<Ipv4Addr>, failure::Error> {
         let network_addr = static_addresses.get("network_addr").unwrap();
         let prefix = ipnetwork::ipv4_mask_to_prefix(*static_addresses.get("subnet_mask").unwrap())?;

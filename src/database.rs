@@ -1,5 +1,5 @@
 use pnet::util::MacAddr;
-use rusqlite::{params, Connection, Transaction, Rows, NO_PARAMS};
+use rusqlite::{params, Connection, Rows, Transaction, NO_PARAMS};
 use std::net::Ipv4Addr;
 
 fn get_addresses_from_row(mut ip_addrs: Rows) -> Result<Vec<Ipv4Addr>, failure::Error> {
@@ -17,7 +17,10 @@ fn get_addresses_from_row(mut ip_addrs: Rows) -> Result<Vec<Ipv4Addr>, failure::
     Ok(leased_addrs)
 }
 
-pub fn select_addresses(con: &Connection, deleted: Option<u8>) -> Result<Vec<Ipv4Addr>, failure::Error> {
+pub fn select_addresses(
+    con: &Connection,
+    deleted: Option<u8>,
+) -> Result<Vec<Ipv4Addr>, failure::Error> {
     if let Some(deleted) = deleted {
         let mut statement = con.prepare("SELECT ip_addr FROM lease_entries WHERE deleted = ?")?;
         let ip_addrs = statement.query(params![deleted.to_string()])?;
@@ -100,7 +103,7 @@ pub fn update_entry(
 pub fn delete_entry(tx: &Transaction, mac_addr: MacAddr) -> Result<(), rusqlite::Error> {
     tx.execute(
         "UPDATE lease_entries SET deleted = ?1 WHERE mac_addr = ?2",
-        params![1.to_string(), mac_addr.to_string()]
+        params![1.to_string(), mac_addr.to_string()],
     )?;
     Ok(())
 }
