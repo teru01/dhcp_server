@@ -67,7 +67,7 @@ fn main() {
                 let cloned_dhcp_server = dhcp_server.clone();
 
                 thread::spawn(move || {
-                    if let Some(dhcp_packet) = DhcpPacket::new(Box::new(recv_buf)) {
+                    if let Some(dhcp_packet) = DhcpPacket::new(recv_buf[..size].to_vec()) {
                         if dhcp_packet.get_op() != BOOTREQUEST {
                             // クライアントからのリクエストでなければ無視
                             return;
@@ -379,7 +379,7 @@ fn make_dhcp_packet(
     ip_to_be_leased: Ipv4Addr,
 ) -> Result<DhcpPacket, io::Error> {
     // パケットの本体となるバッファ。ヒープに確保する。
-    let buffer = Box::new([0u8; DHCP_SIZE]);
+    let buffer = vec![0u8; DHCP_SIZE];
     let mut dhcp_packet = DhcpPacket::new(buffer).unwrap();
 
     // 各種フィールドの設定
