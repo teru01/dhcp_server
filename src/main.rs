@@ -56,7 +56,7 @@ fn main() {
         let mut recv_buf = [0u8; 1024];
         match server_socket.recv_from(&mut recv_buf) {
             Ok((size, src)) => {
-                info!("received data from {}, size: {}", src, size);
+                debug!("received data from {}, size: {}", src, size);
                 let client_socket = server_socket
                     .try_clone()
                     .expect("Failed to create client socket");
@@ -234,6 +234,8 @@ fn dhcp_request_message_handler_to_extend_lease(
         match database::select_entry(&con, client_macaddr) {
             Ok(ip) => {
                 if ip == requested_ip {
+                    // 以前割り当てたIPアドレスと要求されたIPアドレスが一致している時に
+                    // ACKを返す（RFC2131 P30）
                     let dhcp_packet =
                         make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip)?;
                     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
@@ -269,20 +271,15 @@ fn dhcp_request_message_handler_to_extend_lease(
                 "Invalid ciaddr. Mismatched network address.",
             ));
         }
-        let in_use = util::is_ipaddr_already_in_use(ip_from_client)?;
-        if !in_use {
-            let dhcp_packet = make_dhcp_packet(
-                &received_packet,
-                &dhcp_server,
-                DHCPACK,
-                received_packet.get_ciaddr(),
-            )?;
-            util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
-            info!("{:x}: sent DHCPACK", xid);
-            Ok(())
-        } else {
-            Err(failure::err_msg("Invalid ciaddr. Already in use."))
-        }
+        let dhcp_packet = make_dhcp_packet(
+            &received_packet,
+            &dhcp_server,
+            DHCPACK,
+            received_packet.get_ciaddr(),
+        )?;
+        util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
+        info!("{:x}: sent DHCPACK", xid);
+        Ok(())
     }
 }
 
@@ -324,12 +321,8 @@ fn obtain_available_ip_from_requested_option(
     // アドレスプールからの検索
     let ip_from_pool = dhcp_server.pick_specified_ip(requested_ip)?;
 
-    // すでに使われているかチェック
-    if let Ok(used) = util::is_ipaddr_already_in_use(ip_from_pool) {
-        if !used {
-            // 使われていなければそれを返す
-            return Some(requested_ip);
-        }
+    if util::is_ipaddr_available(ip_from_pool).is_ok() {
+        return Some(requested_ip);
     }
     None
 }
@@ -349,10 +342,11 @@ fn select_lease_ip(
 
     // DBから以前リースしたIPアドレスがあればそれを返す。
     if let Ok(ip_from_used) = database::select_entry(&con, received_packet.get_chaddr()) {
-        if let Ok(in_use) = util::is_ipaddr_already_in_use(ip_from_used) {
-            if !in_use {
-                return Ok(ip_from_used);
-            }
+        if dhcp_server.network_addr.contains(ip_from_used)
+            && util::is_ipaddr_available(ip_from_used).is_ok()
+        {
+            // ネットワークアドレスが正しく、利用可能ならばそのIPアドレスを返す。
+            return Ok(ip_from_used);
         }
     }
     drop(con);
@@ -366,15 +360,8 @@ fn select_lease_ip(
 
     // アドレスプールからの取得
     while let Some(ip_addr) = dhcp_server.pick_available_ip() {
-        match util::is_ipaddr_already_in_use(ip_addr) {
-            Ok(used) => {
-                if !used {
-                    return Ok(ip_addr);
-                }
-            }
-            Err(msg) => {
-                warn!("{}", msg);
-            }
+        if util::is_ipaddr_available(ip_addr).is_ok() {
+            return Ok(ip_addr);
         }
     }
     // 利用できるIPアドレスが取得できなかった場合

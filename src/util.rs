@@ -13,14 +13,6 @@ use pnet::packet::Packet;
 use pnet::transport::{self, icmp_packet_iter, TransportChannelType, TransportProtocol::Ipv4};
 use pnet::util::checksum;
 
-#[test]
-fn test_is_ipaddr_already_in_use() {
-    assert_eq!(
-        true,
-        is_ipaddr_already_in_use("192.168.111.1".parse().unwrap()).unwrap()
-    );
-}
-
 /**
  * ICMP echoリクエストのバッファを作成する。
  */
@@ -36,7 +28,7 @@ fn create_default_icmp_buffer() -> [u8; 8] {
 /**
  * IPアドレスがすでに使用されているか調べる。
  */
-pub fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Error> {
+pub fn is_ipaddr_available(target_ip: Ipv4Addr) -> Result<(), failure::Error> {
     let icmp_buf = create_default_icmp_buffer();
     let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
 
@@ -55,7 +47,7 @@ pub fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Er
         if packet.get_icmp_type() == IcmpTypes::EchoReply {
             match sender.send(true) {
                 Err(_) => {
-                    warn!("icmp timeout");
+                    info!("icmp timeout");
                 }
                 _ => {
                     // 送信できた場合は何もせず終了
@@ -66,13 +58,14 @@ pub fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Er
     });
 
     // recvは相手のチャネルがドロップされると失敗する。
-    if receiver.recv_timeout(Duration::from_millis(300)).is_ok() {
-        warn!("ip addr already in use: {}", target_ip);
-        Ok(true)
+    if receiver.recv_timeout(Duration::from_millis(1000)).is_ok() {
+        let message = format!("ip addr already in use: {}", target_ip);
+        warn!("{}", message);
+        Err(failure::err_msg(message))
     } else {
         // タイムアウトした時。アドレスは使われていない
         debug!("not received reply within timeout");
-        Ok(false)
+        Ok(())
     }
 }
 
