@@ -26,10 +26,12 @@ fn create_default_icmp_buffer() -> [u8; 8] {
 }
 
 /**
- * IPアドレスがすでに使用されているか調べる。
+ * IPアドレスが利用可能か調べる
  */
 pub fn is_ipaddr_available(target_ip: Ipv4Addr) -> Result<(), failure::Error> {
     let icmp_buf = create_default_icmp_buffer();
+
+    // ARPではなくICMPを利用する。別のセグメントにも送信可能なため。
     let icmp_packet = EchoRequestPacket::new(&icmp_buf).unwrap();
 
     let (mut transport_sender, mut transport_receiver) = transport::transport_channel(

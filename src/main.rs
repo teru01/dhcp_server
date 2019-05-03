@@ -386,6 +386,9 @@ fn make_dhcp_packet(
     dhcp_packet.set_htype(HTYPE_ETHER);
     dhcp_packet.set_hlen(6); //MACアドレスのオクテット長
     dhcp_packet.set_xid(received_packet.get_xid());
+    if message_type == DHCPACK {
+        dhcp_packet.set_ciaddr(received_packet.get_ciaddr());
+    }
     dhcp_packet.set_yiaddr(ip_to_be_leased);
     dhcp_packet.set_flags(received_packet.get_flags());
     dhcp_packet.set_giaddr(received_packet.get_giaddr());

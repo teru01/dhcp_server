@@ -96,6 +96,10 @@ impl DhcpPacket {
         self.buffer[XID..SECS].copy_from_slice(xid);
     }
 
+    pub fn set_ciaddr(&mut self, ciaddr: Ipv4Addr) {
+        self.buffer[CIADDR..YIADDR].copy_from_slice(&ciaddr.octets());
+    }
+
     pub fn set_yiaddr(&mut self, yiaddr: Ipv4Addr) {
         self.buffer[YIADDR..SIADDR].copy_from_slice(&yiaddr.octets());
     }
