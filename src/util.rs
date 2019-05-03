@@ -24,7 +24,7 @@ fn test_is_ipaddr_already_in_use() {
 /**
  * ICMP echoリクエストのバッファを作成する。
  */
-pub fn create_default_icmp_buffer() -> [u8; 8] {
+fn create_default_icmp_buffer() -> [u8; 8] {
     let mut buffer = [0u8; 8];
     let mut icmp_packet = MutableEchoRequestPacket::new(&mut buffer).unwrap();
     icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
@@ -54,7 +54,9 @@ pub fn is_ipaddr_already_in_use(target_ip: Ipv4Addr) -> Result<bool, failure::Er
         let (packet, _) = iter.next().unwrap();
         if packet.get_icmp_type() == IcmpTypes::EchoReply {
             match sender.send(true) {
-                Err(_) => { warn!("icmp timeout"); },
+                Err(_) => {
+                    warn!("icmp timeout");
+                }
                 _ => {
                     // 送信できた場合は何もせず終了
                     return;
@@ -112,7 +114,7 @@ pub fn obtain_static_addresses(
         .expect("Missing network_addr")
         .parse()?;
 
-    let subnet_mask = env
+    let subnet_mask: Ipv4Addr = env
         .get("SUBNET_MASK")
         .expect("Missing subnet_mask")
         .parse()?;
@@ -138,7 +140,7 @@ pub fn obtain_static_addresses(
     Ok(map)
 }
 
-pub fn make_vec_from_u32(i: u32) -> Result<Vec<u8>, io::Error> {
+pub fn make_big_endian_vec_from_u32(i: u32) -> Result<Vec<u8>, io::Error> {
     let mut v = Vec::new();
     v.write_u32::<BigEndian>(i)?;
     Ok(v)

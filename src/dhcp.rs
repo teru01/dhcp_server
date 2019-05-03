@@ -31,7 +31,6 @@ use super::util;
 
 /**
  * DHCPのパケットを表現する。
- * バッファはコンパイル時にサイズが決まらないためヒープに確保する。
  */
 pub struct DhcpPacket {
     buffer: Vec<u8>,
@@ -150,13 +149,16 @@ impl DhcpPacket {
         let options = self.get_options();
         while options[index] != OPTION_END {
             if options[index] == option_code {
+                // 目的のコードを発見した時。データはコード、サイズ、データの順に並ぶ。
                 let len = options[index + 1];
                 let buf_index = index + 2;
                 let v = options[buf_index..buf_index + len as usize].to_vec();
                 return Some(v);
             } else if options[index] == 0 {
+                // パディングなので飛ばす。
                 index += 1;
             } else {
+                // 目的でない他のオプション。
                 index += 1;
                 let len = options[index];
                 index += 1;
@@ -173,8 +175,9 @@ impl DhcpPacket {
  * 読み出しだけならフィールドにロックは必要ない。
  */
 pub struct DhcpServer {
-    address_pool: RwLock<Vec<Ipv4Addr>>, // 利用可能なアドレス。
+    address_pool: RwLock<Vec<Ipv4Addr>>,  // 利用可能なアドレス。
     pub db_connection: Mutex<Connection>, // ConnectionはSyncを実装しないのでRwLockではだめ。
+    pub network_addr: Ipv4Network,
     pub server_address: Ipv4Addr,
     pub default_gateway: Ipv4Addr,
     pub subnet_mask: Ipv4Addr,
@@ -189,15 +192,21 @@ impl DhcpServer {
         // DNSやゲートウェイなどのアドレス
         let static_addresses = util::obtain_static_addresses(&env)?;
 
+        let network_addr_with_prefix: Ipv4Network = Ipv4Network::new(
+            *static_addresses.get("network_addr").unwrap(),
+            ipnetwork::ipv4_mask_to_prefix(*static_addresses.get("subnet_mask").unwrap()).unwrap(),
+        )
+        .unwrap();
+
         let con = Connection::open("dhcp.db")?;
 
-        let addr_pool = Self::init_address_pool(&con, &static_addresses)?;
+        let addr_pool = Self::init_address_pool(&con, &static_addresses, network_addr_with_prefix)?;
         info!(
             "There are {} addresses in the address pool",
             addr_pool.len()
         );
 
-        let lease_v = util::make_vec_from_u32(
+        let lease_v = util::make_big_endian_vec_from_u32(
             env.get("LEASE_TIME")
                 .expect("Missing lease_time")
                 .parse()
@@ -207,6 +216,7 @@ impl DhcpServer {
         Ok(DhcpServer {
             address_pool: RwLock::new(addr_pool),
             db_connection: Mutex::new(con),
+            network_addr: network_addr_with_prefix,
             server_address: static_addresses["dhcp_server_addr"],
             default_gateway: static_addresses["default_gateway"],
             subnet_mask: static_addresses["subnet_mask"],
@@ -219,10 +229,9 @@ impl DhcpServer {
     fn init_address_pool(
         con: &Connection,
         static_addresses: &HashMap<String, Ipv4Addr>,
+        network_addr_with_prefix: Ipv4Network,
     ) -> Result<Vec<Ipv4Addr>, failure::Error> {
         let network_addr = static_addresses.get("network_addr").unwrap();
-        let prefix = ipnetwork::ipv4_mask_to_prefix(*static_addresses.get("subnet_mask").unwrap())?;
-        let network_addr_with_prefix = Ipv4Network::new(*network_addr, prefix)?;
         let default_gateway = static_addresses.get("default_gateway").unwrap();
         let dhcp_server_addr = static_addresses.get("dhcp_server_addr").unwrap();
         let dns_server_addr = static_addresses.get("dns_addr").unwrap();
@@ -243,6 +252,9 @@ impl DhcpServer {
             .iter()
             .filter(|addr| !used_ip_addrs.contains(addr))
             .collect();
+
+        // 気持ち的にIPアドレスの若い方から割り当てたいので、逆順にする。
+        // 取り出すときは末尾からpop()を行う。
         addr_pool.reverse();
 
         Ok(addr_pool)
@@ -250,14 +262,9 @@ impl DhcpServer {
 
     pub fn pick_available_ip(&self) -> Option<Ipv4Addr> {
         let mut lock = self.address_pool.write().unwrap();
+        // コストを考えてベクタの末尾から取り出す。
         lock.pop()
     }
-
-    // pub fn get_available_ip(&self) -> Option<Ipv4Addr> {
-    //     let mut lock = self.address_pool.write().unwrap();
-    //     // ここで返したものを後にpop()で削除するかもしれないので、最後の値を返す。
-    //     lock[lock.len() - 1]
-    // }
 
     pub fn pick_specified_ip(&self, requested_ip: Ipv4Addr) -> Option<Ipv4Addr> {
         let mut lock = self.address_pool.write().unwrap();
@@ -270,7 +277,7 @@ impl DhcpServer {
     }
 
     // ベクタの先頭にアドレスを返す。
-    // ベクタの後方からリースされていくため、返されたアドレスは当分他のホストにリースされない
+    // ベクタの後方から取り出されるため、返されたアドレスは当分他のホストに割り当てられない
     pub fn release_address(&self, released_ip: Ipv4Addr) {
         let mut lock = self.address_pool.write().unwrap();
         lock.insert(0, released_ip);

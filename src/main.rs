@@ -17,7 +17,6 @@ mod dhcp;
 mod util;
 
 const HTYPE_ETHER: u8 = 1;
-const HLEN_MACADDR: u8 = 6;
 const DHCP_SIZE: usize = 400;
 
 enum Code {
@@ -49,12 +48,9 @@ fn main() {
     server_socket.set_broadcast(true).unwrap();
 
     // ヒープ上にDhcpServer構造体を確保し、複数のスレッドから共有するためArcを利用している。
-    let dhcp_server = Arc::new(match DhcpServer::new() {
-        Ok(dhcp) => dhcp,
-        Err(e) => {
-            panic!("Failed to start dhcp server. {:?}", e);
-        }
-    });
+    let dhcp_server = Arc::new(
+        DhcpServer::new().unwrap_or_else(|e| panic!("Failed to start dhcp server. {:?}", e)),
+    );
 
     loop {
         let mut recv_buf = [0u8; 1024];
@@ -230,6 +226,7 @@ fn dhcp_request_message_handler_to_extend_lease(
     info!("{:x}: received DHCPREQUEST without server_id", xid);
 
     if let Some(requested_ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
+        debug!("client is in INIT-REBOOT");
         // クライアントがINIT-REBOOT状態にあるとき
         let requested_ip = util::u8_to_ipv4addr(&requested_ip)
             .ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
@@ -241,7 +238,7 @@ fn dhcp_request_message_handler_to_extend_lease(
                         make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip)?;
                     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
                     info!("{:x}: sent DHCPACK", xid);
-                    return Ok(());
+                    Ok(())
                 } else {
                     let dhcp_packet = make_dhcp_packet(
                         &received_packet,
@@ -251,26 +248,41 @@ fn dhcp_request_message_handler_to_extend_lease(
                     )?;
                     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
                     info!("{:x}: sent DHCPACK", xid);
-                    return Ok(());
+                    Ok(())
                 }
             }
             Err(e) => {
                 // レコードがないなら何もしてはいけない(RFC2131 P31)
                 warn!("{}", e);
-                return Ok(());
+                Ok(())
             }
         }
     } else {
-        // リース延長など
-        let dhcp_packet = make_dhcp_packet(
-            &received_packet,
-            &dhcp_server,
-            DHCPACK,
-            received_packet.get_ciaddr(),
-        )?;
-        util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
-        info!("{:x}: sent DHCPACK", xid);
-        return Ok(());
+        debug!("client is in RENEWING or REBINDING");
+        // リース延長要求、リース切れによる再要求
+        // 本来は分けるべきだが、手抜きして同じように処理する。
+        // MACアドレスがブロードキャストアドレスがどうかで判別できるが
+        // それをするとデータリンクまで触らないといけなくなるので面倒
+        let ip_from_client = received_packet.get_ciaddr();
+        if !dhcp_server.network_addr.contains(ip_from_client) {
+            return Err(failure::err_msg(
+                "Invalid ciaddr. Mismatched network address.",
+            ));
+        }
+        let in_use = util::is_ipaddr_already_in_use(ip_from_client)?;
+        if !in_use {
+            let dhcp_packet = make_dhcp_packet(
+                &received_packet,
+                &dhcp_server,
+                DHCPACK,
+                received_packet.get_ciaddr(),
+            )?;
+            util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
+            info!("{:x}: sent DHCPACK", xid);
+            Ok(())
+        } else {
+            Err(failure::err_msg("Invalid ciaddr. Already in use."))
+        }
     }
 }
 
@@ -385,7 +397,7 @@ fn make_dhcp_packet(
     // 各種フィールドの設定
     dhcp_packet.set_op(BOOTREPLY);
     dhcp_packet.set_htype(HTYPE_ETHER);
-    dhcp_packet.set_hlen(HLEN_MACADDR);
+    dhcp_packet.set_hlen(6); //MACアドレスのオクテット長
     dhcp_packet.set_xid(received_packet.get_xid());
     dhcp_packet.set_yiaddr(ip_to_be_leased);
     dhcp_packet.set_flags(received_packet.get_flags());
