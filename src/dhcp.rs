@@ -250,7 +250,7 @@ impl DhcpServer {
         used_ip_addrs.push(*dns_server_addr);
         used_ip_addrs.push(broadcast);
 
-        // ネットワークの全てのアドレスから静的に割り振られているアドレスを除いたものを
+        // ネットワークの全てのIPアドレスから使用されているIPアドレスを除いたものを
         // アドレスプールとする。
         let mut addr_pool: Vec<Ipv4Addr> = network_addr_with_prefix
             .iter()
@@ -281,7 +281,7 @@ impl DhcpServer {
     }
 
     // ベクタの先頭にアドレスを返す。
-    // ベクタの後方から取り出されるため、返されたアドレスは当分他のホストに割り当てられない
+    // 取り出しは後方から行われるため、返されたアドレスは当分他のホストに割り当てられない
     pub fn release_address(&self, released_ip: Ipv4Addr) {
         let mut lock = self.address_pool.write().unwrap();
         lock.insert(0, released_ip);

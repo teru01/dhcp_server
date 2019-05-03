@@ -17,6 +17,10 @@ fn get_addresses_from_row(mut ip_addrs: Rows) -> Result<Vec<Ipv4Addr>, failure::
     Ok(leased_addrs)
 }
 
+/**
+ * 利用されているIPアドレスを返す。
+ * deletedが渡された場合は`deleted`カラムをその条件で絞り込む
+ */
 pub fn select_addresses(
     con: &Connection,
     deleted: Option<u8>,
@@ -53,7 +57,7 @@ pub fn count_records_by_mac_addr(
 }
 
 /**
- * リースエントリの追加
+ * バインドの追加
  */
 pub fn insert_entry(
     tx: &Transaction,
@@ -83,7 +87,7 @@ pub fn select_entry(con: &Connection, mac_addr: MacAddr) -> Result<Ipv4Addr, fai
 }
 
 /**
- * リースエントリの更新
+ * バインドの更新
  */
 pub fn update_entry(
     tx: &Transaction,
@@ -98,7 +102,7 @@ pub fn update_entry(
 }
 
 /**
- * リースエントリの論理削除
+ * バインドの論理削除
  */
 pub fn delete_entry(tx: &Transaction, mac_addr: MacAddr) -> Result<(), rusqlite::Error> {
     tx.execute(

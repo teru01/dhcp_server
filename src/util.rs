@@ -49,6 +49,7 @@ pub fn is_ipaddr_available(target_ip: Ipv4Addr) -> Result<(), failure::Error> {
         if packet.get_icmp_type() == IcmpTypes::EchoReply {
             match sender.send(true) {
                 Err(_) => {
+                    // 制限時間を超過してリプライが届いた場合
                     info!("icmp timeout");
                 }
                 _ => {
@@ -59,13 +60,13 @@ pub fn is_ipaddr_available(target_ip: Ipv4Addr) -> Result<(), failure::Error> {
         }
     });
 
-    // recvは相手のチャネルがドロップされると失敗する。
-    if receiver.recv_timeout(Duration::from_millis(1000)).is_ok() {
+    if receiver.recv_timeout(Duration::from_millis(500)).is_ok() {
+        // 制限時間内にecho リプライが届いた場合。IPアドレスは使われている。
         let message = format!("ip addr already in use: {}", target_ip);
         warn!("{}", message);
         Err(failure::err_msg(message))
     } else {
-        // タイムアウトした時。アドレスは使われていない
+        // タイムアウトした時。アドレスは使われていない。
         debug!("not received reply within timeout");
         Ok(())
     }

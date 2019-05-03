@@ -110,7 +110,7 @@ fn dhcp_handler(
                 soc,
                 server_id,
             ),
-            None => dhcp_request_message_handler_to_extend_lease(
+            None => dhcp_request_message_handler_to_reallocate(
                 transaction_id,
                 dhcp_server,
                 &packet,
@@ -150,6 +150,7 @@ fn dhcp_discover_message_handler(
     let ip_to_be_leased = select_lease_ip(&dhcp_server, &received_packet)?;
 
     // 決定したリースIPでDHCPパケットの作成
+    // DHCPOFFERメッセージを返却する
     let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPOFFER, ip_to_be_leased)?;
     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
 
@@ -180,7 +181,8 @@ fn dhcp_request_message_handler_responded_to_offer(
         return Ok(());
     }
 
-    // OFFERに対する応答の場合、必ず'requested IP address'にリース予定のIPアドレスが含まれる（RFC2131 P30)
+    // OFFERに対する応答の場合、必ず'requested IP address'に
+    // リース予定のIPアドレスが含まれる（RFC2131 P30)
     let ip_bin = received_packet
         .get_option(Code::RequestedIpAddress as u8)
         .unwrap();
@@ -188,21 +190,25 @@ fn dhcp_request_message_handler_responded_to_offer(
         .ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
 
     let mut con = dhcp_server.db_connection.lock().unwrap();
-    let tx = con.transaction()?;
-    let count = database::count_records_by_mac_addr(&tx, client_macaddr)?;
-    match count {
-        // レコードがないならinsert
-        0 => database::insert_entry(&tx, client_macaddr, ip_to_be_leased)?,
-        // レコードがあるならupdate
-        _ => database::update_entry(&tx, client_macaddr, ip_to_be_leased)?,
-    }
+    let count = {
+        // トランザクションのクリティカルセクションを短く保つためにブロックにする。
 
-    let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip_to_be_leased)?;
-    util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
-    info!("{:x}: sent DHCPACK", xid);
+        let tx = con.transaction()?;
+        let count = database::count_records_by_mac_addr(&tx, client_macaddr)?;
+        match count {
+            // レコードがないならinsert
+            0 => database::insert_entry(&tx, client_macaddr, ip_to_be_leased)?,
+            // レコードがあるならupdate
+            _ => database::update_entry(&tx, client_macaddr, ip_to_be_leased)?,
+        }
 
-    tx.commit()?;
-    drop(con);
+        let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip_to_be_leased)?;
+        util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
+        info!("{:x}: sent DHCPACK", xid);
+
+        tx.commit()?;
+        count
+    };
 
     debug!("{:x}: leased address: {}", xid, ip_to_be_leased);
     match count {
@@ -216,7 +222,7 @@ fn dhcp_request_message_handler_responded_to_offer(
  * REQUESTメッセージのオプションにserver_identifierが含まれない場合のハンドラ
  * IPリース延長要求、以前割り当てられていたIPの確認などを処理する。
  */
-fn dhcp_request_message_handler_to_extend_lease(
+fn dhcp_request_message_handler_to_reallocate(
     xid: u32,
     dhcp_server: Arc<DhcpServer>,
     received_packet: &DhcpPacket,
@@ -242,6 +248,7 @@ fn dhcp_request_message_handler_to_extend_lease(
                     info!("{:x}: sent DHCPACK", xid);
                     Ok(())
                 } else {
+                    // 不適切なIPアドレスが要求されるとNAKを返す
                     let dhcp_packet = make_dhcp_packet(
                         &received_packet,
                         &dhcp_server,
@@ -301,7 +308,6 @@ fn dhcp_release_message_handler(
     // 論理削除。OFFERを返す際に解放済のアドレスを再割り当てする場合があるから
     database::delete_entry(&tx, client_macaddr)?;
     tx.commit()?;
-    drop(con);
 
     debug!("{:x}: deleted from DB", xid);
     // 解放されたアドレスをアドレスプールに戻す。
@@ -338,18 +344,22 @@ fn select_lease_ip(
     dhcp_server: &Arc<DhcpServer>,
     received_packet: &DhcpPacket,
 ) -> Result<Ipv4Addr, failure::Error> {
-    let con = dhcp_server.db_connection.lock().unwrap();
+    {
+        //DBコネクションに対するロックの生存期間を短くするため、ブロックに入れる
 
-    // DBから以前リースしたIPアドレスがあればそれを返す。
-    if let Ok(ip_from_used) = database::select_entry(&con, received_packet.get_chaddr()) {
-        if dhcp_server.network_addr.contains(ip_from_used)
-            && util::is_ipaddr_available(ip_from_used).is_ok()
-        {
-            // ネットワークアドレスが正しく、利用可能ならばそのIPアドレスを返す。
-            return Ok(ip_from_used);
+        let con = dhcp_server.db_connection.lock().unwrap();
+        // DBから以前割り当てたIPアドレスがあればそれを返す。
+        if let Ok(ip_from_used) = database::select_entry(&con, received_packet.get_chaddr()) {
+            // IPアドレスが重複していないか
+            // .envに記載されたネットワークアドレスの変更があった時のために、
+            // 現在のネットワークに含まれているかを合わせて確認する
+            if dhcp_server.network_addr.contains(ip_from_used)
+                && util::is_ipaddr_available(ip_from_used).is_ok()
+            {
+                return Ok(ip_from_used);
+            }
         }
     }
-    drop(con);
 
     // Requested Ip Addrオプションがあり、利用可能ならばそのIPアドレスを返却。
     if let Some(ip_to_be_leased) =
