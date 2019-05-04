@@ -60,7 +60,7 @@ pub fn is_ipaddr_available(target_ip: Ipv4Addr) -> Result<(), failure::Error> {
         }
     });
 
-    if receiver.recv_timeout(Duration::from_millis(500)).is_ok() {
+    if receiver.recv_timeout(Duration::from_millis(200)).is_ok() {
         // 制限時間内にecho リプライが届いた場合。IPアドレスは使われている。
         let message = format!("ip addr already in use: {}", target_ip);
         warn!("{}", message);
