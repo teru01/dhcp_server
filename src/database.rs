@@ -74,17 +74,33 @@ pub fn insert_entry(
 /**
  * 指定のMACアドレスをもつエントリ（論理削除されているものも含めて）のIPアドレスを返す。
  */
-pub fn select_entry(con: &Connection, mac_addr: MacAddr) -> Result<Ipv4Addr, failure::Error> {
+pub fn select_entry(
+    con: &Connection,
+    mac_addr: MacAddr,
+) -> Result<Option<Ipv4Addr>, rusqlite::Error> {
     let mut stmnt = con.prepare("SELECT ip_addr FROM lease_entries WHERE mac_addr = ?1")?;
     let mut row = stmnt.query(params![mac_addr.to_string()])?;
     if let Some(entry) = row.next()? {
         let ip = entry.get(0)?;
         let ip_string: String = ip;
-        Ok(ip_string.parse().unwrap())
+        Ok(Some(ip_string.parse().unwrap()))
     } else {
-        Err(failure::err_msg("specified MAC addr was not found."))
+        info!("specified MAC addr was not found.");
+        Ok(None)
     }
 }
+
+// /**
+//  * 指定のIDを持つレコードの論理削除を解除し、使用中としてマークする。
+//  */
+// pub fn mark_as_in_use(tx: &Transaction, id: u32) -> Result<(), rusqlite::Error> {
+//     tx.execute(
+//         "UPDATE lease_entries SET deleted = ?1 WHERE id = ?2",
+//         params![0.to_string(), id.to_string()],
+//     )?;
+//     warn!("db updated, id: {}", id);
+//     Ok(())
+// }
 
 /**
  * バインドの更新
@@ -93,10 +109,11 @@ pub fn update_entry(
     tx: &Transaction,
     mac_addr: MacAddr,
     ip_addr: Ipv4Addr,
+    deleted: u8
 ) -> Result<(), rusqlite::Error> {
     tx.execute(
-        "UPDATE lease_entries SET ip_addr = ?2 WHERE mac_addr = ?1",
-        params![mac_addr.to_string(), ip_addr.to_string()],
+        "UPDATE lease_entries SET ip_addr = ?2, deleted = ?3 WHERE mac_addr = ?1",
+        params![mac_addr.to_string(), ip_addr.to_string(), deleted.to_string()],
     )?;
     Ok(())
 }

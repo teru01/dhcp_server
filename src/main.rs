@@ -199,10 +199,11 @@ fn dhcp_request_message_handler_responded_to_offer(
             // レコードがないならinsert
             0 => database::insert_entry(&tx, client_macaddr, ip_to_be_leased)?,
             // レコードがあるならupdate
-            _ => database::update_entry(&tx, client_macaddr, ip_to_be_leased)?,
+            _ => database::update_entry(&tx, client_macaddr, ip_to_be_leased, 0)?,
         }
 
-        let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip_to_be_leased)?;
+        let dhcp_packet =
+            make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip_to_be_leased)?;
         util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
         info!("{:x}: sent DHCPACK", xid);
 
@@ -238,11 +239,12 @@ fn dhcp_request_message_handler_to_reallocate(
         let requested_ip = util::u8_to_ipv4addr(&requested_ip)
             .ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
         let con = dhcp_server.db_connection.lock().unwrap();
-        match database::select_entry(&con, client_macaddr) {
-            Ok(ip) => {
-                if ip == requested_ip {
-                    // 以前割り当てたIPアドレスと要求されたIPアドレスが一致している時に
-                    // ACKを返す（RFC2131 P30）
+        match database::select_entry(&con, client_macaddr)? {
+            Some(ip) => {
+                if ip == requested_ip && dhcp_server.network_addr.contains(ip) {
+                    // 以前割り当てたIPアドレスと要求されたIPアドレスが一致しており、
+                    // ネットワークに含まれている時はACKを返す
+                    // ACKを返す（RFC2131 P30 "DHCPREQUEST generated during INIT-REBOOT state"）
                     let dhcp_packet =
                         make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip)?;
                     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
@@ -261,9 +263,8 @@ fn dhcp_request_message_handler_to_reallocate(
                     Ok(())
                 }
             }
-            Err(e) => {
+            None => {
                 // レコードがないなら何もしてはいけない(RFC2131 P31)
-                warn!("{}", e);
                 Ok(())
             }
         }
@@ -346,11 +347,11 @@ fn select_lease_ip(
     received_packet: &DhcpPacket,
 ) -> Result<Ipv4Addr, failure::Error> {
     {
-        //DBコネクションに対するロックの生存期間を短くするため、ブロックに入れる
+        //トランザクションを短くするため、ブロックに入れる
 
         let con = dhcp_server.db_connection.lock().unwrap();
         // DBから以前割り当てたIPアドレスがあればそれを返す。
-        if let Ok(ip_from_used) = database::select_entry(&con, received_packet.get_chaddr()) {
+        if let Some(ip_from_used) = database::select_entry(&con, received_packet.get_chaddr())? {
             // IPアドレスが重複していないか
             // .envに記載されたネットワークアドレスの変更があった時のために、
             // 現在のネットワークに含まれているかを合わせて確認する
