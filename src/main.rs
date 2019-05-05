@@ -233,7 +233,8 @@ fn dhcp_request_message_handler_to_reallocate(
 
     if let Some(requested_ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
         debug!("client is in INIT-REBOOT");
-        // クライアントがINIT-REBOOT状態にあるとき
+        // クライアントが以前割り当てられたIPアドレスを記憶していて、
+        // 再起動状態にあるとき
         let requested_ip = util::u8_to_ipv4addr(&requested_ip)
             .ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
         let con = dhcp_server.db_connection.lock().unwrap();
