@@ -43,6 +43,7 @@ pub fn is_ipaddr_available(target_ip: Ipv4Addr) -> Result<(), failure::Error> {
     let (sender, receiver) = mpsc::channel();
 
     // ICMP echoリクエストのリプライに対してタイムアウトを設定するため、スレッドを起動する。
+    // このスレッドはEchoリプライを受信するまで残り続ける。
     thread::spawn(move || {
         let mut iter = icmp_packet_iter(&mut transport_receiver);
         let (packet, _) = iter.next().unwrap();
@@ -61,7 +62,7 @@ pub fn is_ipaddr_available(target_ip: Ipv4Addr) -> Result<(), failure::Error> {
     });
 
     if receiver.recv_timeout(Duration::from_millis(200)).is_ok() {
-        // 制限時間内にecho リプライが届いた場合。IPアドレスは使われている。
+        // 制限時間内にEchoリプライが届いた場合。IPアドレスは使われている。
         let message = format!("ip addr already in use: {}", target_ip);
         warn!("{}", message);
         Err(failure::err_msg(message))
@@ -136,12 +137,18 @@ pub fn obtain_static_addresses(
     Ok(map)
 }
 
+/**
+ * u32をビッグエンディアンでバイト列ベクタに変換
+ */
 pub fn make_big_endian_vec_from_u32(i: u32) -> Result<Vec<u8>, io::Error> {
     let mut v = Vec::new();
     v.write_u32::<BigEndian>(i)?;
     Ok(v)
 }
 
+/**
+ * ブロードキャストでDHCPクライアントにデータを送信する。
+ */
 pub fn send_dhcp_broadcast_response(soc: &UdpSocket, data: &[u8]) -> Result<(), failure::Error> {
     let destination: SocketAddr = "255.255.255.255:68".parse()?;
     soc.send_to(data, destination)?;

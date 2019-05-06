@@ -6,7 +6,7 @@ use pnet::util::MacAddr;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::Arc;
 use std::thread;
-use std::{env, io};
+use std::env;
 #[macro_use]
 extern crate log;
 use dhcp::DhcpPacket;
@@ -17,6 +17,9 @@ mod dhcp;
 mod util;
 
 const HTYPE_ETHER: u8 = 1;
+
+// オプションの数を考慮して決定する。
+// 大きめにとっても問題はない。
 const DHCP_SIZE: usize = 400;
 
 enum Code {
@@ -136,7 +139,7 @@ fn dhcp_handler(
 
 /**
  * DISCOVERメッセージを受信した時のハンドラ。
- * 利用できるアドレスを選択してOFFERを返却する。
+ * 利用できるアドレスを選択してDHCPOFFERメッセージを返却する。
  */
 fn dhcp_discover_message_handler(
     xid: u32,
@@ -149,7 +152,7 @@ fn dhcp_discover_message_handler(
     // IPアドレスの決定
     let ip_to_be_leased = select_lease_ip(&dhcp_server, &received_packet)?;
 
-    // 決定したリースIPでDHCPパケットの作成
+    // 決定したIPアドレスでDHCPパケットの作成
     // DHCPOFFERメッセージを返却する
     let dhcp_packet = make_dhcp_packet(&received_packet, &dhcp_server, DHCPOFFER, ip_to_be_leased)?;
     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
@@ -160,7 +163,7 @@ fn dhcp_discover_message_handler(
 
 /**
 * REQUESTメッセージのオプションにserver_identifierが含まれる場合のハンドラ
-* サーバが返したOFFERに対する返答を処理する。
+* サーバが返したDHCPOFFERメッセージに対する返答を処理する。
 */
 fn dhcp_request_message_handler_responded_to_offer(
     xid: u32,
@@ -181,8 +184,8 @@ fn dhcp_request_message_handler_responded_to_offer(
         return Ok(());
     }
 
-    // OFFERに対する応答の場合、必ず'requested IP address'に
-    // リース予定のIPアドレスが含まれる（RFC2131 P30)
+    // DHCPOFFERメッセージに対する応答の場合、必ず'requested IP address'に
+    // 割り当て予定のIPアドレスが含まれる
     let ip_bin = received_packet
         .get_option(Code::RequestedIpAddress as u8)
         .unwrap();
@@ -220,8 +223,8 @@ fn dhcp_request_message_handler_responded_to_offer(
 }
 
 /**
- * REQUESTメッセージのオプションにserver_identifierが含まれない場合のハンドラ
- * IPリース延長要求、以前割り当てられていたIPの確認などを処理する。
+ * DHCPREQUESTメッセージのオプションにserver_identifierが含まれない場合のハンドラ
+ * リース延長要求、以前割り当てられていたIPアドレスの確認などを処理する。
  */
 fn dhcp_request_message_handler_to_reallocate(
     xid: u32,
@@ -244,7 +247,7 @@ fn dhcp_request_message_handler_to_reallocate(
                 if ip == requested_ip && dhcp_server.network_addr.contains(ip) {
                     // 以前割り当てたIPアドレスと要求されたIPアドレスが一致しており、
                     // ネットワークに含まれている時はACKを返す
-                    // ACKを返す（RFC2131 P30 "DHCPREQUEST generated during INIT-REBOOT state"）
+                    // ACKを返す（RFC2131 P31 "DHCPREQUEST generated during INIT-REBOOT state"）
                     let dhcp_packet =
                         make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip)?;
                     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
@@ -256,7 +259,7 @@ fn dhcp_request_message_handler_to_reallocate(
                         &received_packet,
                         &dhcp_server,
                         DHCPNAK,
-                        "0.0.0.0".parse().unwrap(),
+                        "0.0.0.0".parse()?,
                     )?;
                     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
                     info!("{:x}: sent DHCPACK", xid);
@@ -264,16 +267,14 @@ fn dhcp_request_message_handler_to_reallocate(
                 }
             }
             None => {
-                // レコードがないなら何もしてはいけない(RFC2131 P31)
+                // レコードがないなら何もしてはいけない(RFC2131 P32)
                 Ok(())
             }
         }
     } else {
         debug!("client is in RENEWING or REBINDING");
         // リース延長要求、リース切れによる再要求
-        // 本来は分けるべきだが、手抜きして同じように処理する。
-        // MACアドレスがブロードキャストアドレスがどうかで判別できるが
-        // それをするとデータリンクまで触らないといけなくなるので面倒
+        // 本来はこれらの状態で処理を分けるべきだが、簡略化のため同じように処理する。
         let ip_from_client = received_packet.get_ciaddr();
         if !dhcp_server.network_addr.contains(ip_from_client) {
             return Err(failure::err_msg(
@@ -293,8 +294,8 @@ fn dhcp_request_message_handler_to_reallocate(
 }
 
 /**
- * RELEASEメッセージを受け取った時のハンドラ
- * DBからリース記録を論理削除し、リースしていたIPアドレスをアドレスプールに戻す。
+ * DHCPRELEASEメッセージを受け取った時のハンドラ
+ * DBからリース記録を論理削除し、割り当てていたIPアドレスをアドレスプールに戻す。
  */
 fn dhcp_release_message_handler(
     xid: u32,
@@ -307,12 +308,12 @@ fn dhcp_release_message_handler(
     let mut con = dhcp_server.db_connection.lock().unwrap();
     let tx = con.transaction()?;
 
-    // 論理削除。OFFERを返す際に解放済のアドレスを再割り当てする場合があるから
+    // 論理削除。DHCPOFFERメッセージを返す際に解放済のIPアドレスを再割り当てする場合があるから
     database::delete_entry(&tx, client_macaddr)?;
     tx.commit()?;
 
     debug!("{:x}: deleted from DB", xid);
-    // 解放されたアドレスをアドレスプールに戻す。
+    // 解放されたIPアドレスをアドレスプールに戻す。
     dhcp_server.release_address(received_packet.get_ciaddr());
     Ok(())
 }
@@ -337,17 +338,17 @@ fn obtain_available_ip_from_requested_option(
 
 /**
  * 利用可能なIPアドレスを選ぶ。
- * 1.以前そのクライアントにリースされたアドレス(解放されたものも含め)
- * 2.クライアントから要求されたアドレス
+ * 1.以前そのクライアントにリースされたIPアドレス(解放されたものも含め)
+ * 2.クライアントから要求されたIPアドレス
  * 3.アドレスプール
- * の優先順位で利用可能なIPアドレスを返却する。(RFC2131 P27)
+ * の優先順位で利用可能なIPアドレスを返却する。
  */
 fn select_lease_ip(
     dhcp_server: &Arc<DhcpServer>,
     received_packet: &DhcpPacket,
 ) -> Result<Ipv4Addr, failure::Error> {
     {
-        //トランザクションを短くするため、ブロックに入れる
+        //クリティカルセクションを短くするため、ブロックに入れる
 
         let con = dhcp_server.db_connection.lock().unwrap();
         // DBから以前割り当てたIPアドレスがあればそれを返す。
@@ -388,7 +389,7 @@ fn make_dhcp_packet(
     dhcp_server: &Arc<DhcpServer>,
     message_type: u8,
     ip_to_be_leased: Ipv4Addr,
-) -> Result<DhcpPacket, io::Error> {
+) -> Result<DhcpPacket, failure::Error> {
     // パケットの本体となるバッファ。ヒープに確保する。
     let buffer = vec![0u8; DHCP_SIZE];
     let mut dhcp_packet = DhcpPacket::new(buffer).unwrap();

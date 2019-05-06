@@ -2,13 +2,16 @@ use pnet::util::MacAddr;
 use rusqlite::{params, Connection, Rows, Transaction, NO_PARAMS};
 use std::net::Ipv4Addr;
 
+/**
+ * 結果のレコードからIPアドレスのカラムを取り出し、そのベクタを返す。
+ */
 fn get_addresses_from_row(mut ip_addrs: Rows) -> Result<Vec<Ipv4Addr>, failure::Error> {
     let mut leased_addrs: Vec<Ipv4Addr> = Vec::new();
     while let Some(entry) = ip_addrs.next()? {
         let ip_addr = match entry.get(0) {
             Ok(ip) => {
                 let ip_string: String = ip;
-                ip_string.parse().unwrap()
+                ip_string.parse()?
             }
             Err(_) => continue,
         };
@@ -42,7 +45,7 @@ pub fn select_addresses(
 pub fn count_records_by_mac_addr(
     tx: &Transaction,
     mac_addr: MacAddr,
-) -> Result<u8, rusqlite::Error> {
+) -> Result<u8, failure::Error> {
     let mut stmnt = tx.prepare("SELECT COUNT (*) FROM lease_entries WHERE mac_addr = ?")?;
     let mut count_result = stmnt.query(params![mac_addr.to_string()])?;
 
@@ -50,20 +53,20 @@ pub fn count_records_by_mac_addr(
         Some(row) => row.get(0)?,
         None => {
             // 1行も結果がなかった場合（countの結果なので基本的に起こりえない）
-            return Err(rusqlite::Error::QueryReturnedNoRows);
+            return Err(failure::err_msg("No query returned."));
         }
     };
     Ok(count)
 }
 
 /**
- * バインドの追加
+ * バインディングの追加
  */
 pub fn insert_entry(
     tx: &Transaction,
     mac_addr: MacAddr,
     ip_addr: Ipv4Addr,
-) -> Result<(), rusqlite::Error> {
+) -> Result<(), failure::Error> {
     tx.execute(
         "INSERT INTO lease_entries (mac_addr, ip_addr) VALUES (?1, ?2)",
         params![mac_addr.to_string(), ip_addr.to_string()],
@@ -77,51 +80,43 @@ pub fn insert_entry(
 pub fn select_entry(
     con: &Connection,
     mac_addr: MacAddr,
-) -> Result<Option<Ipv4Addr>, rusqlite::Error> {
+) -> Result<Option<Ipv4Addr>, failure::Error> {
     let mut stmnt = con.prepare("SELECT ip_addr FROM lease_entries WHERE mac_addr = ?1")?;
     let mut row = stmnt.query(params![mac_addr.to_string()])?;
     if let Some(entry) = row.next()? {
         let ip = entry.get(0)?;
         let ip_string: String = ip;
-        Ok(Some(ip_string.parse().unwrap()))
+        Ok(Some(ip_string.parse()?))
     } else {
         info!("specified MAC addr was not found.");
         Ok(None)
     }
 }
 
-// /**
-//  * 指定のIDを持つレコードの論理削除を解除し、使用中としてマークする。
-//  */
-// pub fn mark_as_in_use(tx: &Transaction, id: u32) -> Result<(), rusqlite::Error> {
-//     tx.execute(
-//         "UPDATE lease_entries SET deleted = ?1 WHERE id = ?2",
-//         params![0.to_string(), id.to_string()],
-//     )?;
-//     warn!("db updated, id: {}", id);
-//     Ok(())
-// }
-
 /**
- * バインドの更新
+ * バインディングの更新
  */
 pub fn update_entry(
     tx: &Transaction,
     mac_addr: MacAddr,
     ip_addr: Ipv4Addr,
-    deleted: u8
-) -> Result<(), rusqlite::Error> {
+    deleted: u8,
+) -> Result<(), failure::Error> {
     tx.execute(
         "UPDATE lease_entries SET ip_addr = ?2, deleted = ?3 WHERE mac_addr = ?1",
-        params![mac_addr.to_string(), ip_addr.to_string(), deleted.to_string()],
+        params![
+            mac_addr.to_string(),
+            ip_addr.to_string(),
+            deleted.to_string()
+        ],
     )?;
     Ok(())
 }
 
 /**
- * バインドの論理削除
+ * バインディングの論理削除
  */
-pub fn delete_entry(tx: &Transaction, mac_addr: MacAddr) -> Result<(), rusqlite::Error> {
+pub fn delete_entry(tx: &Transaction, mac_addr: MacAddr) -> Result<(), failure::Error> {
     tx.execute(
         "UPDATE lease_entries SET deleted = ?1 WHERE mac_addr = ?2",
         params![1.to_string(), mac_addr.to_string()],

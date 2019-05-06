@@ -23,6 +23,7 @@ const SNAME: usize = 44;
 // const FILE: usize = 108;
 pub const OPTIONS: usize = 236;
 
+// フィールドだけのDHCPパケットのサイズ
 const DHCP_MINIMUM_SIZE: usize = 237;
 const OPTION_END: u8 = 255;
 
@@ -197,10 +198,9 @@ impl DhcpServer {
         let static_addresses = util::obtain_static_addresses(&env)?;
 
         let network_addr_with_prefix: Ipv4Network = Ipv4Network::new(
-            *static_addresses.get("network_addr").unwrap(),
-            ipnetwork::ipv4_mask_to_prefix(*static_addresses.get("subnet_mask").unwrap()).unwrap(),
-        )
-        .unwrap();
+            static_addresses["network_addr"],
+            ipnetwork::ipv4_mask_to_prefix(static_addresses["subnet_mask"])?,
+        )?;
 
         let con = Connection::open("dhcp.db")?;
 
@@ -210,11 +210,8 @@ impl DhcpServer {
             addr_pool.len()
         );
 
-        let lease_v = util::make_big_endian_vec_from_u32(
-            env.get("LEASE_TIME")
-                .expect("Missing lease_time")
-                .parse()
-                .unwrap(),
+        let lease_time = util::make_big_endian_vec_from_u32(
+            env.get("LEASE_TIME").expect("Missing lease_time").parse()?,
         )?;
 
         Ok(DhcpServer {
@@ -225,7 +222,7 @@ impl DhcpServer {
             default_gateway: static_addresses["default_gateway"],
             subnet_mask: static_addresses["subnet_mask"],
             dns_server: static_addresses["dns_addr"],
-            lease_time: lease_v,
+            lease_time,
         })
     }
 
@@ -241,7 +238,7 @@ impl DhcpServer {
         let dns_server_addr = static_addresses.get("dns_addr").unwrap();
         let broadcast = network_addr_with_prefix.broadcast();
 
-        // すでに使用されていて、リリースもされていないアドレス
+        // すでに使用されていて、解放もされていないIPアドレス
         let mut used_ip_addrs = database::select_addresses(con, Some(0))?;
 
         used_ip_addrs.push(*network_addr);
@@ -250,7 +247,7 @@ impl DhcpServer {
         used_ip_addrs.push(*dns_server_addr);
         used_ip_addrs.push(broadcast);
 
-        // ネットワークの全てのIPアドレスから使用されているIPアドレスを除いたものを
+        // ネットワークの全てのIPアドレスから、使用されているIPアドレスを除いたものを
         // アドレスプールとする。
         let mut addr_pool: Vec<Ipv4Addr> = network_addr_with_prefix
             .iter()
@@ -264,12 +261,18 @@ impl DhcpServer {
         Ok(addr_pool)
     }
 
+    /**
+     * アドレスプールからIPアドレスを引き抜く
+     */
     pub fn pick_available_ip(&self) -> Option<Ipv4Addr> {
         let mut lock = self.address_pool.write().unwrap();
         // コストを考えてベクタの末尾から取り出す。
         lock.pop()
     }
 
+    /**
+     * アドレスプールから指定のIPアドレスを引き抜く
+     */
     pub fn pick_specified_ip(&self, requested_ip: Ipv4Addr) -> Option<Ipv4Addr> {
         let mut lock = self.address_pool.write().unwrap();
         for i in 0..lock.len() {
@@ -280,8 +283,10 @@ impl DhcpServer {
         None
     }
 
-    // ベクタの先頭にアドレスを返す。
-    // 取り出しは後方から行われるため、返されたアドレスは当分他のホストに割り当てられない
+    /**
+     * ベクタの先頭にアドレスを返す。
+     * 取り出しは後方から行われるため、返されたアドレスは当分他のホストに割り当てられない
+     */
     pub fn release_address(&self, released_ip: Ipv4Addr) {
         let mut lock = self.address_pool.write().unwrap();
         lock.insert(0, released_ip);
