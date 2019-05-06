@@ -10,7 +10,7 @@ use rusqlite::Connection;
 const OP: usize = 0;
 const HTYPE: usize = 1;
 const HLEN: usize = 2;
-// const HOPS: usize = 3;
+/* const HOPS: usize = 3; 今回は利用しない */
 const XID: usize = 4;
 const SECS: usize = 8;
 const FLAGS: usize = 10;
@@ -20,7 +20,7 @@ const SIADDR: usize = 20;
 const GIADDR: usize = 24;
 const CHADDR: usize = 28;
 const SNAME: usize = 44;
-// const FILE: usize = 108;
+/* const FILE: usize = 108; 今回は利用しない */
 pub const OPTIONS: usize = 236;
 
 // フィールドだけのDHCPパケットのサイズ
@@ -226,7 +226,9 @@ impl DhcpServer {
         })
     }
 
-    // 新たなホストに割り当て可能なアドレスプールを初期化
+    /**
+     * 新たなホストに割り当て可能なアドレスプールを初期化
+     */
     fn init_address_pool(
         con: &Connection,
         static_addresses: &HashMap<String, Ipv4Addr>,

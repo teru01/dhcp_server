@@ -3,10 +3,10 @@ use env_logger;
 use failure;
 use log::{debug, error, info};
 use pnet::util::MacAddr;
+use std::env;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::Arc;
 use std::thread;
-use std::env;
 #[macro_use]
 extern crate log;
 use dhcp::DhcpPacket;
@@ -179,7 +179,7 @@ fn dhcp_request_message_handler_responded_to_offer(
         .ok_or_else(|| failure::err_msg("Failed to convert ip addr."))?;
 
     if server_ip != dhcp_server.server_address {
-        // クライアントが別のDHCPサーバを選択した場合。
+        /* クライアントが別のDHCPサーバを選択した場合。[1] */
         info!("Client has chosen another dhcp server.");
         return Ok(());
     }
@@ -236,6 +236,7 @@ fn dhcp_request_message_handler_to_reallocate(
     info!("{:x}: received DHCPREQUEST without server_id", xid);
 
     if let Some(requested_ip) = received_packet.get_option(Code::RequestedIpAddress as u8) {
+        /* [2] */
         debug!("client is in INIT-REBOOT");
         // クライアントが以前割り当てられたIPアドレスを記憶していて、
         // 再起動状態にあるとき
@@ -247,7 +248,6 @@ fn dhcp_request_message_handler_to_reallocate(
                 if ip == requested_ip && dhcp_server.network_addr.contains(ip) {
                     // 以前割り当てたIPアドレスと要求されたIPアドレスが一致しており、
                     // ネットワークに含まれている時はACKを返す
-                    // ACKを返す（RFC2131 P31 "DHCPREQUEST generated during INIT-REBOOT state"）
                     let dhcp_packet =
                         make_dhcp_packet(&received_packet, &dhcp_server, DHCPACK, ip)?;
                     util::send_dhcp_broadcast_response(soc, dhcp_packet.get_buffer())?;
@@ -272,6 +272,7 @@ fn dhcp_request_message_handler_to_reallocate(
             }
         }
     } else {
+        /* [3] */
         debug!("client is in RENEWING or REBINDING");
         // リース延長要求、リース切れによる再要求
         // 本来はこれらの状態で処理を分けるべきだが、簡略化のため同じように処理する。
