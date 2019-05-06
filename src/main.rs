@@ -1,7 +1,7 @@
 use byteorder::{BigEndian, ByteOrder};
 use env_logger;
 use failure;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use pnet::util::MacAddr;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::Arc;
