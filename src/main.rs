@@ -128,11 +128,11 @@ fn dhcp_handler(
 
         _ => {
             // 未実装のメッセージを受信した場合。
-            let msg = format!(
+            Err(failure::format_err!(
                 "{:x}: received unimplemented message, message_type:{}",
-                transaction_id, message_type
-            );
-            Err(failure::err_msg(msg))
+                transaction_id,
+                message_type
+            ))
         }
     }
 }
