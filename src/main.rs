@@ -60,7 +60,7 @@ fn main() {
         match server_socket.recv_from(&mut recv_buf) {
             Ok((size, src)) => {
                 debug!("received data from {}, size: {}", src, size);
-                let client_socket = server_socket
+                let transmission_socket = server_socket
                     .try_clone()
                     .expect("Failed to create client socket");
                 let cloned_dhcp_server = dhcp_server.clone();
@@ -72,7 +72,7 @@ fn main() {
                             return;
                         }
                         if let Err(e) =
-                            dhcp_handler(&dhcp_packet, &client_socket, cloned_dhcp_server)
+                            dhcp_handler(&dhcp_packet, &transmission_socket, cloned_dhcp_server)
                         {
                             error!("{}", e);
                         }
